@@ -1,0 +1,33 @@
+# Build artifacts
+*.exe
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.exe.manifest
+*.res
+
+# Runtime data (user-specific)
+nova_history.txt
+nova_dev_log.txt
+nova_config.ini
+nova_exec_out.txt
+llama.log
+
+# Personal/dev files
+.bash_history
+PaceKeyChain
+explore_log
+cl
+d
+rc
+
+# Model files (too large for git)
+models/
+engine/
+
+# IDE
+.vs/
+*.suo
+*.user
