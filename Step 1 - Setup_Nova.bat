@@ -134,7 +134,8 @@ echo  ============================================
 echo    NOVA SETUP IS COMPLETE!
 echo  ============================================
 echo    THE NEXT STEPS:
-echo    1. Run 'Step 2 - Save_Changes.bat' to compile Nova.
-echo    2. Run 'Step 3 - Run_Nova.bat' to launch!
+echo    1. Run 'Step 2 - Compile_Nova.bat' to compile Nova.
+echo    2. Run 'Step 3 - Run_Nova.bat' to launch Nova.
+echo    3. Run 'Step 4 - Create_Shortcut.bat' to create Nova shortcut on desktop.
 echo  ============================================
 pause
