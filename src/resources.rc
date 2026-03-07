@@ -1,0 +1,4 @@
+// Nova icon resource
+// ID 1 is the standard for the main application icon
+MAINICON ICON "Nova.ico"
+1 ICON "Nova.ico"
