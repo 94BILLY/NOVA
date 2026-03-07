@@ -1,0 +1,37 @@
+# --- Nova System Ignore ---
+
+# Executables & Binaries
+*.exe
+*.dll
+*.pdb
+*.node
+
+# MSVC Build Artifacts (The "Junk")
+*.obj
+*.res
+*.log
+*.tlog
+*.lastbuildstate
+*.idb
+*.intermediate.manifest
+
+# AI Engine & Models (Crucial!)
+# These are downloaded via Setup.bat; do NOT upload them to GitHub.
+engine/
+models/
+
+# User-Specific Data
+# Keep the user's local history and custom personality private.
+nova_history.txt
+# Optional: Uncomment below if you want users to start with a fresh personality file
+# nova_personality.txt
+
+# VS Code / IDE Folders
+.vscode/
+.vs/
+out/
+build/
+
+# OS Generated Files
+Thumbs.db
+desktop.ini
