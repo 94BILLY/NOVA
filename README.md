@@ -31,8 +31,8 @@ Nova operates as an automated software architect following a rigid dual-executio
 
 ### 5. Installation
 1. **Provisioning:** Run **Step 1 - Setup_Nova.bat** to initialize the engine and fetch model weights.
-2. **Verification:** Run **Step 2 - Save_Changes.bat** to verify the environment and compile the binary.
-3. **Initialization:** Run **Step 3 - Run_Nova.bat** to start the engine and launch the Nova UI.
+2. **Verification:** Run **Step 2 - Compile_Nova.bat** to verify the environment and compile the binary.
+3. **Initialization:** Run **Step 3 - Run_Nova.bat** to launch the Nova UI.
 4. **Integration:** Run **Step 4 - Create_Shortcut.bat** to generate your executive desktop icon.
 
 ---
