@@ -1,19 +1,23 @@
-/* * ============================================================================
- * NOVA v 1.0.0 The Executive Desktop Assistant
+/* ============================================================================
+ * NOVA — v1.5.0 (RTM Gold Master)
  * Copyright (C) 2026 [94BILLY]. All Rights Reserved.
- * * PROPRIETARY AND CONFIDENTIAL:
- * This software and its source code are the sole property of the author. 
- * Unauthorized copying, distribution, or modification of this file, 
- * via any medium, is strictly prohibited.
+ * ============================================================================
  *
- * RELEASE NOTES v1.0:
- *   - Unified 17-provider backend (local + cloud)
- *   - Protocol adapters: OpenAI-compat, Anthropic Messages, Gemini, llama-legacy
- *   - Full Settings dialog with provider presets, model/API key config
- *   - Auto-detection of local backends (llama-server, Ollama, LM Studio, etc.)
- *   - Config persistence in nova_config.ini
- *   - All original features: EXEC engine, TTS, attachments,
- *     image/audio/video analysis, EvolvingPersonality, dev console
+ * PROPRIETARY AND CONFIDENTIAL:
+ * This software and its source code are the sole property of the author.
+ * Unauthorized copying, distribution, or modification of this file,
+ * via any medium, is strictly prohibited.
+ * ============================================================================
+ *
+ * RELEASE NOTES v1.5.0:
+ * - Added dedicated 'Stop' button with thread-safe inference termination
+ * - Implemented EnableDPIAwareness() for crisp native rendering on 4K displays
+ * - Upgraded UI math for a centered, 7-button dashboard layout (600px width)
+ * - Fixed SAPI Text-to-Speech initialization and voice rate bugs
+ * - Introduced single-line 'EXEC:' command chaining (Anti-Hallucination patch)
+ * - Migrated to universal environment variables (%USERPROFILE%) for cross-machine execution
+ * - Sterilized default persona and system prompts for open-source deployment
+ * - Maintained all v1.0 features: 17-provider backend, settings UI, multimodal analysis, and EvolvingPersonality®
  * ============================================================================
  */
 #define WINVER       0x0601
@@ -28,14 +32,10 @@
 #include <math.h>
 
 #include <windows.h>
-#include <wininet.h> 
+#include <wininet.h>
 #include <sapi.h>
 #include <string>
 #include <algorithm>
-// GDI+ headers use bare min/max — NOMINMAX blocks the Windows macros,
-// so we pull them in from <algorithm> before GDI+ sees them.
-using std::min;
-using std::max;
 #include <thread>
 #include <cstdio>
 #include <cstdarg>
@@ -44,13 +44,20 @@ using std::max;
 #include <mutex>
 #include <fstream>
 #include <atomic>
+#include <filesystem>     // <--- REQUIRED for std::filesystem
+#include <unordered_map>  // <--- REQUIRED for Plugin storage
+#include <memory>         // <--- REQUIRED for UniqueHModule (unique_ptr)
 #include <richedit.h>
 #include <commctrl.h>
+// GDI+ uses bare min/max — provide them from std:: (NOMINMAX suppresses the Windows macros)
+using std::min;
+using std::max;
 #include <gdiplus.h>
 #include <commdlg.h>
 #include <mmsystem.h>
 #include <shlobj.h>
 #include <map>
+#include <functional>
 
 #pragma comment(lib, "wininet.lib")
 #pragma comment(lib, "user32.lib")
@@ -63,100 +70,173 @@ using std::max;
 #pragma comment(lib, "winmm.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "shlwapi.lib")
+#pragma comment(lib, "sapi.lib")
+#pragma comment(lib, "advapi32.lib")
 
 #pragma comment(linker,"\"/manifestdependency:type='win32' \
 name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
 processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
+// DPI awareness — tells Windows not to bitmap-scale the window
+#if !defined(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
+DECLARE_HANDLE(DPI_AWARENESS_CONTEXT);
+#define DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 ((DPI_AWARENESS_CONTEXT)-4)
+#endif
+typedef BOOL(WINAPI* SetPDAC_t)(DPI_AWARENESS_CONTEXT);
+static void EnableDPIAwareness() {
+    HMODULE hUser = GetModuleHandleW(L"user32.dll");
+    if (!hUser) return;
+    auto fn = (SetPDAC_t)GetProcAddress(hUser, "SetProcessDpiAwarenessContext");
+    if (fn) fn(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+}
+
+// ════════════════════════════════════════════════════════════════
+// CONSTANTS & CONTROL IDS
+// ════════════════════════════════════════════════════════════════
+static constexpr const wchar_t* NOVA_VERSION = L"1.0.1";
+
 #define IDT_PULSE       1002
 #define PULSE_INTERVAL  40
-#define MIN_WIN_W       680
+#define MIN_WIN_W       600
 #define MIN_WIN_H       500
 #define WM_AI_DONE      (WM_APP + 1)
 #define WM_ENGINE_READY (WM_APP + 2)
 #define WM_EXEC_DONE    (WM_APP + 3)
 
+// Button command IDs (main window)
+#define IDC_BTN_SEND     101
+#define IDC_BTN_CLEAR    102
+#define IDC_BTN_MUTE     103
+#define IDC_BTN_DEV      104
+#define IDC_BTN_ATTACH   105
+#define IDC_BTN_SETTINGS 106
+#define IDC_BTN_STOP     107
+
 // Settings dialog control IDs
-#define IDC_PROVIDER_COMBO  2001
-#define IDC_HOST_EDIT       2002
-#define IDC_PORT_EDIT       2003
-#define IDC_APIKEY_EDIT     2004
-#define IDC_MODEL_EDIT      2005
-#define IDC_ENDPOINT_EDIT   2006
-#define IDC_SSL_CHECK       2007
-#define IDC_TEMP_EDIT       2008
-#define IDC_MAXTOK_EDIT     2009
-#define IDC_BTN_SAVE        2010
-#define IDC_BTN_TEST        2011
-#define IDC_AUTOSTART_CHECK 2012
-#define IDC_CTXSIZE_EDIT    2013
-#define IDC_GPULAYERS_EDIT  2014
+#define IDC_COMBO_PROV   201
+#define IDC_EDIT_HOST    202
+#define IDC_EDIT_PORT    203
+#define IDC_EDIT_APIKEY  204
+#define IDC_EDIT_MODEL   205
+#define IDC_EDIT_TEMP    206
+#define IDC_EDIT_MAXTOK  207
+#define IDC_EDIT_CTX     208
+#define IDC_EDIT_GPU     209
+#define IDC_EDIT_MODPATH 210
+#define IDC_CHECK_AUTO   211
+#define IDC_TEST_BTN     212
+#define IDC_SAVE_BTN     213
+#define IDC_STATUS_LBL   214
 
-enum class AppState { Online, Busy, Offline };
+// ════════════════════════════════════════════════════════════════
+// ENUMERATIONS
+// ════════════════════════════════════════════════════════════════
+enum class AppState : int { Online, Busy, Offline };
 
-// ── Protocol Adapters ────────────────────────────────────────────
-enum class Protocol { LlamaLegacy, OpenAICompat, Anthropic, Gemini };
+enum ProviderType {
+    PROV_LLAMA_SERVER = 0,  // 1.  llama-server (local, legacy /completion)
+    PROV_OLLAMA,            // 2.  Ollama
+    PROV_LM_STUDIO,         // 3.  LM Studio
+    PROV_VLLM,              // 4.  vLLM
+    PROV_KOBOLDCPP,         // 5.  KoboldCpp
+    PROV_JAN,               // 6.  Jan
+    PROV_GPT4ALL,           // 7.  GPT4All
+    PROV_CUSTOM_LOCAL,      // 8.  Custom Local
+    PROV_OPENAI,            // 9.  OpenAI
+    PROV_ANTHROPIC,         // 10. Anthropic (Claude)
+    PROV_GEMINI,            // 11. Google Gemini
+    PROV_GROQ,              // 12. Groq
+    PROV_MISTRAL,           // 13. Mistral AI
+    PROV_TOGETHER,          // 14. Together AI
+    PROV_OPENROUTER,        // 15. OpenRouter
+    PROV_XAI,               // 16. xAI (Grok)
+    PROV_CUSTOM_CLOUD,      // 17. Custom Cloud
+    PROV_COUNT              // = 17
+};
 
+enum class ProtocolType {
+    LlamaLegacy,    // /completion  with "prompt" field
+    OpenAICompat,   // /v1/chat/completions  with "messages" array
+    Anthropic,      // /v1/messages  with Anthropic-specific format
+    Gemini          // /v1beta/models/MODEL:generateContent
+};
+
+// ════════════════════════════════════════════════════════════════
+// STRUCTS
+// ════════════════════════════════════════════════════════════════
 struct ProviderPreset {
     const wchar_t* displayName;
     const char*    defaultHost;
     int            defaultPort;
-    const char*    defaultModel;
     const char*    defaultEndpoint;
-    bool           useSSL;
-    Protocol       protocol;
+    bool           needsSSL;
+    bool           needsApiKey;
+    const char*    defaultModel;
+    ProtocolType   protocol;
 };
 
-static const ProviderPreset g_providerPresets[] = {
-    { L"Local (llama-server)",   "127.0.0.1",                              11434, "",                                "/completion",                  false, Protocol::LlamaLegacy  },
-    { L"Ollama",                 "127.0.0.1",                              11434, "llama3",                          "/v1/chat/completions",         false, Protocol::OpenAICompat },
-    { L"LM Studio",             "127.0.0.1",                              1234,  "",                                "/v1/chat/completions",         false, Protocol::OpenAICompat },
-    { L"vLLM",                   "127.0.0.1",                              8000,  "",                                "/v1/chat/completions",         false, Protocol::OpenAICompat },
-    { L"KoboldCpp",              "127.0.0.1",                              5001,  "",                                "/v1/chat/completions",         false, Protocol::OpenAICompat },
-    { L"Jan",                    "127.0.0.1",                              1337,  "",                                "/v1/chat/completions",         false, Protocol::OpenAICompat },
-    { L"GPT4All",                "127.0.0.1",                              4891,  "",                                "/v1/chat/completions",         false, Protocol::OpenAICompat },
-    { L"text-gen-webui",         "127.0.0.1",                              5000,  "",                                "/v1/chat/completions",         false, Protocol::OpenAICompat },
-    { L"OpenAI",                 "api.openai.com",                         443,   "gpt-4o-mini",                     "/v1/chat/completions",         true,  Protocol::OpenAICompat },
-    { L"Anthropic",              "api.anthropic.com",                      443,   "claude-sonnet-4-20250514",        "/v1/messages",                 true,  Protocol::Anthropic    },
-    { L"Google Gemini",          "generativelanguage.googleapis.com",      443,   "gemini-2.0-flash",                "/v1beta/models/",              true,  Protocol::Gemini       },
-    { L"Groq",                   "api.groq.com",                           443,   "llama-3.3-70b-versatile",         "/openai/v1/chat/completions",  true,  Protocol::OpenAICompat },
-    { L"Mistral",                "api.mistral.ai",                         443,   "mistral-small-latest",            "/v1/chat/completions",         true,  Protocol::OpenAICompat },
-    { L"Together AI",            "api.together.xyz",                       443,   "meta-llama/Llama-3-8b-chat-hf",   "/v1/chat/completions",         true,  Protocol::OpenAICompat },
-    { L"OpenRouter",             "openrouter.ai",                          443,   "meta-llama/llama-3-8b-instruct",  "/api/v1/chat/completions",     true,  Protocol::OpenAICompat },
-    { L"xAI Grok",               "api.x.ai",                               443,   "grok-2",                          "/v1/chat/completions",         true,  Protocol::OpenAICompat },
-    { L"Custom (OpenAI-compat)", "127.0.0.1",                              8080,  "",                                "/v1/chat/completions",         false, Protocol::OpenAICompat },
+static const ProviderPreset g_providerPresets[PROV_COUNT] = {
+    // 1. llama-server
+    { L"llama-server (local)",    "127.0.0.1", 11434, "/completion",           false, false, "",                        ProtocolType::LlamaLegacy  },
+    // 2. Ollama
+    { L"Ollama",                  "127.0.0.1", 11434, "/v1/chat/completions",  false, false, "llama3:latest",           ProtocolType::OpenAICompat },
+    // 3. LM Studio
+    { L"LM Studio",              "127.0.0.1", 1234,  "/v1/chat/completions",  false, false, "",                        ProtocolType::OpenAICompat },
+    // 4. vLLM
+    { L"vLLM",                   "127.0.0.1", 8000,  "/v1/chat/completions",  false, false, "",                        ProtocolType::OpenAICompat },
+    // 5. KoboldCpp
+    { L"KoboldCpp",              "127.0.0.1", 5001,  "/v1/chat/completions",  false, false, "",                        ProtocolType::OpenAICompat },
+    // 6. Jan
+    { L"Jan",                    "127.0.0.1", 1337,  "/v1/chat/completions",  false, false, "",                        ProtocolType::OpenAICompat },
+    // 7. GPT4All
+    { L"GPT4All",                "127.0.0.1", 4891,  "/v1/chat/completions",  false, false, "",                        ProtocolType::OpenAICompat },
+    // 8. Custom Local
+    { L"Custom Local",           "127.0.0.1", 8080,  "/v1/chat/completions",  false, false, "",                        ProtocolType::OpenAICompat },
+    // 9. OpenAI
+    { L"OpenAI",                 "api.openai.com",       443, "/v1/chat/completions",  true, true, "gpt-4o-mini",      ProtocolType::OpenAICompat },
+    // 10. Anthropic
+    { L"Anthropic (Claude)",     "api.anthropic.com",    443, "/v1/messages",           true, true, "claude-3-haiku-20240307", ProtocolType::Anthropic },
+    // 11. Google Gemini
+    { L"Google Gemini",          "generativelanguage.googleapis.com", 443, "/v1beta/models/", true, true, "gemini-1.5-flash", ProtocolType::Gemini },
+    // 12. Groq
+    { L"Groq",                   "api.groq.com",         443, "/openai/v1/chat/completions", true, true, "llama3-8b-8192", ProtocolType::OpenAICompat },
+    // 13. Mistral AI
+    { L"Mistral AI",             "api.mistral.ai",       443, "/v1/chat/completions",  true, true, "mistral-small-latest", ProtocolType::OpenAICompat },
+    // 14. Together AI
+    { L"Together AI",            "api.together.xyz",     443, "/v1/chat/completions",  true, true, "meta-llama/Llama-3-8b-chat-hf", ProtocolType::OpenAICompat },
+    // 15. OpenRouter
+    { L"OpenRouter",             "openrouter.ai",        443, "/api/v1/chat/completions", true, true, "meta-llama/llama-3-8b-instruct", ProtocolType::OpenAICompat },
+    // 16. xAI (Grok)
+    { L"xAI (Grok)",            "api.x.ai",             443, "/v1/chat/completions",  true, true, "grok-beta",        ProtocolType::OpenAICompat },
+    // 17. Custom Cloud
+    { L"Custom Cloud",           "api.example.com",      443, "/v1/chat/completions",  true, true, "",                 ProtocolType::OpenAICompat },
 };
-constexpr int PROVIDER_COUNT = sizeof(g_providerPresets) / sizeof(g_providerPresets[0]);
 
-// ── Configuration ────────────────────────────────────────────────
 struct NovaConfig {
-    int         provider       = 0;
-    std::string host           = "127.0.0.1";
-    int         port           = 11434;
-    std::string apiKey;
-    std::string model;
-    std::string endpointPath   = "/completion";
-    bool        useSSL         = false;
-    float       temperature    = 0.4f;
-    int         maxTokens      = 1024;
-    int         contextSize    = 8192;
-    int         gpuLayers      = 99;
-    bool        autoStartEngine= true;
-    std::string modelPath      = "models\\llama3.gguf";
-    int         enginePort     = 11434;
+    ProviderType provider     = PROV_LLAMA_SERVER;
+    std::string  host         = "127.0.0.1";
+    int          port         = 11434;
+    std::string  apiKey;
+    std::string  model;
+    std::string  endpointPath = "/completion";
+    bool         useSSL       = false;
+    float        temperature  = 0.4f;
+    int          maxTokens    = 1024;
+    int          contextSize  = 8192;
+    int          gpuLayers    = 99;
+    bool         autoStartEngine = true;
+    std::string  modelPath    = "models\\llama3.gguf";
+    int          enginePort   = 11434;
 };
 
-static NovaConfig g_config;
-
-// ── Attachment ────────────────────────────────────────────────────
 struct Attachment {
     std::wstring path;
     std::wstring displayName;
     std::string  textContent;
-    bool         isImage  = false;
-    bool         isAudio  = false;
-    bool         isText   = false;
-    bool         isVideo  = false;
+    bool         isImage = false;
+    bool         isAudio = false;
+    bool         isText  = false;
+    bool         isVideo = false;
 };
 
 struct ChatRequest {
@@ -165,49 +245,210 @@ struct ChatRequest {
     Attachment   attachment;
 };
 
-HWND  hMainWnd;
-HWND  hEditDisplay, hEditInput;
-HWND  hButtonSend, hButtonClear, hButtonMute, hButtonDev, hButtonAttach, hButtonSettings;
-HWND  hIndicator, hAttachLabel;
-HFONT hFontMain, hFontBtn, hFontIndicator;
-WNDPROC OldEditProc;
+// ══════════════════════════════════════════════════════════════════
+// THREAD-SAFE APP STATE MANAGEMENT & PLUGIN ENGINE
+// ══════════════════════════════════════════════════════════════════
+void DevLog(const char* fmt, ...);
+std::string DecodeJsonString(const std::string& json, const std::string& key);
 
-// Settings dialog
-HWND  g_hSettingsWnd = nullptr;
-HFONT hFontSettings = nullptr;
-HWND  hComboProvider, hEditHost, hEditPort, hEditApiKey, hEditModel;
-HWND  hEditEndpoint, hCheckSSL, hEditTemp, hEditMaxTok;
-HWND  hCheckAutoStart, hEditCtxSize, hEditGpuLayers;
-HWND  hLabelStatus;
+struct HModuleDeleter {
+    using pointer = HMODULE; 
+    void operator()(HMODULE h) const noexcept { if (h) FreeLibrary(h); }
+};
+using UniqueHModule = std::unique_ptr<void, HModuleDeleter>;
+
+struct LoadedPlugin {
+    std::string name;
+    std::string minifiedSchema;
+    UniqueHModule handle;
+    typedef const char* (*GetToolSchemaFunc)();
+    typedef const char* (*ExecuteToolFunc)(const char*);
+    GetToolSchemaFunc fnGetSchema = nullptr;
+    ExecuteToolFunc fnExecute = nullptr;
+};
+
+class PluginManager {
+private:
+    std::unordered_map<std::string, LoadedPlugin> m_plugins;
+    std::string m_aggregatedPrompt; 
+
+    std::string MinifyJsonString(const std::string& input) {
+        std::string output; output.reserve(input.size()); bool inQuotes = false;
+        for (char c : input) {
+            if (c == '\"' && (output.empty() || output.back() != '\\')) inQuotes = !inQuotes;
+            if (inQuotes || (c != ' ' && c != '\n' && c != '\r' && c != '\t')) output += c;
+        }
+        return output;
+    }
+public:
+    void ScanAndLoad(const std::wstring& pluginDir) {
+        m_plugins.clear(); m_aggregatedPrompt = "=== AVAILABLE TOOLS ===\n";
+        if (!std::filesystem::exists(pluginDir)) return;
+        for (const auto& entry : std::filesystem::directory_iterator(pluginDir)) {
+            if (entry.path().extension() == L".dll") {
+                UniqueHModule hMod(LoadLibraryW(entry.path().c_str()));
+                if (!hMod) continue;
+                auto fnSchema = (LoadedPlugin::GetToolSchemaFunc)GetProcAddress(hMod.get(), "GetToolSchema");
+                auto fnExec = (LoadedPlugin::ExecuteToolFunc)GetProcAddress(hMod.get(), "ExecuteTool");
+                if (fnSchema && fnExec) {
+                    const char* rawSchemaPtr = fnSchema(); 
+                    if (rawSchemaPtr) {
+                        std::string rawSchema = rawSchemaPtr;
+                        std::string minSchema = MinifyJsonString(rawSchema);
+                        std::string toolName = DecodeJsonString(rawSchema, "name"); 
+                        if (!toolName.empty()) {
+                            LoadedPlugin plugin; plugin.name = toolName; plugin.minifiedSchema = minSchema;
+                            plugin.handle = std::move(hMod); plugin.fnGetSchema = fnSchema; plugin.fnExecute = fnExec;
+                            m_aggregatedPrompt += minSchema + "\n"; m_plugins[toolName] = std::move(plugin);
+                            DevLog("[PluginManager] Loaded: %s\n", toolName.c_str());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    std::string GetPluginSystemPrompt() const { return m_plugins.empty() ? "" : m_aggregatedPrompt; }
+    std::string ExecutePlugin(const std::string& toolName, const std::string& jsonArgs) {
+        auto it = m_plugins.find(toolName);
+        if (it != m_plugins.end() && it->second.fnExecute) {
+            const char* res = it->second.fnExecute(jsonArgs.c_str());
+            return res ? std::string(res) : "{\"error\": \"Plugin returned null\"}";
+        }
+        return "{\"error\": \"Tool not found\"}";
+    }
+};
+
+class AppStateManager {
+private:
+    AppStateManager() = default;
+    ~AppStateManager() = default;
+    PluginManager m_pluginManager;
+
+public:
+    NovaConfig config;
+    std::atomic<AppState> state{ AppState::Offline };
+    std::atomic<bool> aiRunning{false};      // Moved here for safety
+    std::atomic<bool> abortInference{false}; // The Kill-Switch flag
+
+    AppStateManager(const AppStateManager&) = delete;
+    AppStateManager& operator=(const AppStateManager&) = delete;
+
+    static AppStateManager& Instance() {
+        static AppStateManager instance;
+        return instance;
+    }
+
+    PluginManager& GetPluginManager() { return m_pluginManager; }
+    void InitializePlugins(const std::wstring& dir) { m_pluginManager.ScanAndLoad(dir); }
+};
+
+// ════════════════════════════════════════════════════════════════
+// GLOBALS (Bridged to Singleton)
+// ════════════════════════════════════════════════════════════════
+// These references ensure older code using g_config automatically points to the Singleton
+static NovaConfig& g_config = AppStateManager::Instance().config;
+static std::atomic<AppState>& g_appState = AppStateManager::Instance().state;
+static std::atomic<bool>& aiRunning = AppStateManager::Instance().aiRunning;
+
+std::string g_currentAgentDir = "";
+HWND  hMainWnd      = nullptr;
+HWND  hEditDisplay  = nullptr;
+HWND  hEditInput    = nullptr;
+HWND  hButtonSend   = nullptr;
+HWND  hButtonClear  = nullptr;
+HWND  hButtonMute   = nullptr;
+HWND  hButtonStop   = nullptr;
+HWND  hButtonDev    = nullptr;
+HWND  hButtonAttach = nullptr;
+HWND  hButtonSettings = nullptr;
+HWND  hIndicator    = nullptr;
+HWND  hAttachLabel  = nullptr;
+HWND  hSettingsWnd  = nullptr;
+HFONT hFontMain     = nullptr;
+HFONT hFontBtn      = nullptr;
+HFONT hFontIndicator = nullptr;
+WNDPROC OldEditProc = nullptr;
 
 bool       g_hasAttachment = false;
 Attachment g_attachment;
 
 std::mutex        historyMutex;
 std::wstring      conversationHistory;
-std::atomic<bool> aiRunning(false);
 std::atomic<bool> g_muted(false);
 bool              consoleAllocated = false;
 
-ISpVoice* g_pVoice    = nullptr;
+ISpVoice* g_pVoice = nullptr;
 std::mutex g_voiceMutex;
 
 const size_t      MAX_HISTORY_CHARS = 8000;
 const std::string g_historyFile     = "nova_history.txt";
 const std::string g_personalityFile = "nova_personality.txt";
+const std::string g_devLogFile      = "nova_dev_log.txt";
 const std::string g_configFile      = "nova_config.ini";
 
-AppState  g_appState  = AppState::Online;
 float     g_pulseT    = 0.0f;
 ULONG_PTR g_gdipToken = 0;
 
-// ────────────────────────────────────────────────────────────────
-// DEV LOGGER
-// ────────────────────────────────────────────────────────────────
+PROCESS_INFORMATION g_serverPi = {};
+
+// ════════════════════════════════════════════════════════════════
+// FORWARD DECLARATIONS
+// ════════════════════════════════════════════════════════════════
 std::string GetExeDir();
+std::string GetDesktopDir();
+std::string PrecisionEscape(const std::string& s);
+std::string DecodeJsonString(const std::string& json, const std::string& key);
+std::string WStringToString(const std::wstring& w);
+std::wstring StringToWString(const std::string& s);
+std::string UrlEncode(const std::string& s);
+std::string Base64Encode(const std::vector<BYTE>& data);
+std::string ExtractReply(const std::string& raw, ProtocolType proto);
 
-const std::string g_devLogFile = "nova_dev_log.txt";
+void SaveConfig();
+void LoadConfig();
 
+void AppendRichText(HWND hRich, const std::wstring& text, bool bBold, COLORREF color = RGB(30, 30, 30));
+void SpeakAsync(const std::wstring& text);
+void SaveHistory();
+void LoadHistory();
+void TrimHistory();
+std::string LoadPersonality();
+void SavePersonality(const std::string& n);
+void EvolvePersonality(const std::string& current, const std::string& exchange);
+void ExecuteNovaCommand(const std::string& command, bool needsVS_Param = false);
+
+std::string FetchUrl(const std::string& url, const std::string& ua = "Mozilla/5.0");
+std::string FetchWeather(const std::string& loc);
+std::string FetchNews(const std::string& q);
+std::string FetchWiki(const std::string& q);
+std::string AnalyzeAndFetch(const std::string& lower, const std::string& orig);
+
+std::string AnalyzeImageGDIPlus(const std::wstring& path);
+std::string AnalyzeWavDetailed(const std::wstring& path);
+std::string AnalyzeVideoFile(const std::wstring& path, const std::string& ext);
+bool LoadAttachment(const std::wstring& path, Attachment& out);
+void OpenAttachDialog();
+void ClearAttachment();
+
+void AIThreadFunc(std::wstring userMsg, std::string webInfo, bool hasAttach, Attachment attach);
+DWORD WINAPI ChatThreadProc(LPVOID param);
+void ProcessChat();
+void SetAppState(AppState s);
+void LayoutControls(HWND hwnd);
+bool IsServerAlreadyRunning();
+void StartLocalEngine();
+void StopLocalEngine();
+
+void ShowSettingsDialog(HWND parent);
+
+LRESULT CALLBACK IndicatorWndProc(HWND h, UINT m, WPARAM w, LPARAM l);
+LRESULT CALLBACK EditSubclassProc(HWND h, UINT m, WPARAM w, LPARAM l);
+LRESULT CALLBACK SettingsWndProc(HWND h, UINT m, WPARAM w, LPARAM l);
+LRESULT CALLBACK WindowProc(HWND h, UINT m, WPARAM w, LPARAM l);
+
+// ════════════════════════════════════════════════════════════════
+// DEV LOGGER
+// ════════════════════════════════════════════════════════════════
 static std::mutex g_logMutex;
 
 static void DevLog(const char* fmt, ...) {
@@ -230,143 +471,26 @@ static void DevLog(const char* fmt, ...) {
         fprintf(logFile, "%s%s", timeBuf, msgBuf);
         fclose(logFile);
     }
-
     if (consoleAllocated) {
         printf("%s%s", timeBuf, msgBuf);
         fflush(stdout);
     }
 }
 
-// ────────────────────────────────────────────────────────────────
-// LOCAL AI ENGINE MANAGEMENT
-// ────────────────────────────────────────────────────────────────
-PROCESS_INFORMATION g_serverPi = {};
-
-bool IsServerAlreadyRunning() {
-    HINTERNET hS = InternetOpenW(L"NovaProbe", 1, 0, 0, 0);
-    if (!hS) return false;
-    DWORD timeout = 1000;
-    InternetSetOptionA(hS, INTERNET_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
-    InternetSetOptionA(hS, INTERNET_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
-
-    std::wstring hostW = L"127.0.0.1";
-    INTERNET_PORT checkPort = (INTERNET_PORT)g_config.enginePort;
-
-    HINTERNET hC = InternetConnectW(hS, hostW.c_str(), checkPort, 0, 0, 3, 0, 0);
-    bool alive = false;
-    if (hC) {
-        HINTERNET hR = HttpOpenRequestW(hC, L"GET", L"/health", 0, 0, 0, INTERNET_FLAG_RELOAD, 0);
-        if (hR) {
-            alive = HttpSendRequestA(hR, 0, 0, 0, 0) ? true : false;
-            InternetCloseHandle(hR);
-        }
-        InternetCloseHandle(hC);
-    }
-    InternetCloseHandle(hS);
-    return alive;
-}
-
-void StartLocalEngine() {
-    if (IsServerAlreadyRunning()) {
-        DevLog("[System] llama-server already running on :%d — skipping launch\n", g_config.enginePort);
-        return;
-    }
-
-    DevLog("[System] Starting embedded llama-server engine...\n");
-    STARTUPINFOA si = { sizeof(si) };
-    si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-    
-    char cmd[512];
-    sprintf_s(cmd, "engine\\llama-server.exe -m %s --port %d -c %d -ngl %d",
-              g_config.modelPath.c_str(), g_config.enginePort,
-              g_config.contextSize, g_config.gpuLayers);
-    
-    if (CreateProcessA(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &g_serverPi)) {
-        CloseHandle(g_serverPi.hThread);
-        g_serverPi.hThread = NULL;
-        DevLog("[System] Local engine launched (PID: %lu)\n", g_serverPi.dwProcessId);
-        DevLog("[System] Waiting for engine to warm up...\n");
-        for (int i = 0; i < 30; i++) {
-            Sleep(1000);
-            if (IsServerAlreadyRunning()) {
-                DevLog("[System] Engine ready after %d seconds\n", i + 1);
-                return;
-            }
-        }
-        DevLog("[System] WARNING: Engine did not respond within 30s\n");
-    } else {
-        DevLog("[System] ERROR: Failed to start local engine. GLE=%lu\n", GetLastError());
-    }
-}
-
-void StopLocalEngine() {
-    if (g_serverPi.hProcess) {
-        DevLog("[System] Shutting down local engine (PID: %lu)...\n", g_serverPi.dwProcessId);
-        TerminateProcess(g_serverPi.hProcess, 0);
-        CloseHandle(g_serverPi.hProcess);
-        if (g_serverPi.hThread) CloseHandle(g_serverPi.hThread);
-        g_serverPi.hProcess = NULL;
-    } else {
-        DevLog("[System] Engine was externally managed — not killing\n");
-    }
-}
-
-// ────────────────────────────────────────────────────────────────
-// FORWARD DECLARATIONS
-// ────────────────────────────────────────────────────────────────
-void AppendRichText(HWND hRich, const std::wstring& text, bool bBold, COLORREF color = RGB(30, 30, 30));
-std::string PrecisionEscape(const std::string& s);
-std::string DecodeJsonString(const std::string& json, const std::string& key);
-std::string WStringToString(const std::wstring& w);
-std::wstring StringToWString(const std::string& s);
-std::string UrlEncode(const std::string& s);
-void SpeakAsync(const std::wstring& text);
-std::string GetExeDir();
-std::string GetDesktopDir();
-void SaveHistory();
-void LoadHistory();
-void TrimHistory();
-std::string LoadPersonality();
-void SavePersonality(const std::string& n);
-void EvolvePersonality(const std::string& current, const std::string& exchange); 
-std::string FetchUrl(const std::string& url, const std::string& ua = "Mozilla/5.0");
-std::string FetchWeather(const std::string& loc);
-std::string FetchNews(const std::string& q);
-std::string FetchWiki(const std::string& q);
-std::string AnalyzeAndFetch(const std::string& lower, const std::string& orig);
-std::string Base64Encode(const std::vector<BYTE>& data);
-std::string AnalyzeImageGDIPlus(const std::wstring& path);
-std::string AnalyzeWavDetailed(const std::wstring& path);
-std::string AnalyzeVideoFile(const std::wstring& path, const std::string& ext);
-bool LoadAttachment(const std::wstring& path, Attachment& out);
-void OpenAttachDialog();
-void ClearAttachment();
-void OpenSettingsDialog();
-void LoadConfig();
-void SaveConfig();
-void AIThreadFunc(std::wstring userMsg, std::string webInfo, bool hasAttach, Attachment attach);
-DWORD WINAPI ChatThreadProc(LPVOID param);
-void ProcessChat();
-void SetAppState(AppState s);
-void LayoutControls(HWND hwnd);
-LRESULT CALLBACK IndicatorWndProc(HWND h, UINT m, WPARAM w, LPARAM l);
-LRESULT CALLBACK EditSubclassProc(HWND h, UINT m, WPARAM w, LPARAM l);
-LRESULT CALLBACK SettingsWndProc(HWND h, UINT m, WPARAM w, LPARAM l);
-LRESULT CALLBACK WindowProc(HWND h, UINT m, WPARAM w, LPARAM l);
-
-// ────────────────────────────────────────────────────────────────
-// UTILITIES
-// ────────────────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════
+// UTILITY FUNCTIONS
+// ════════════════════════════════════════════════════════════════
 std::string PrecisionEscape(const std::string& in) {
     std::ostringstream o;
     for (char c : in) {
-        if      (c == '"')  o << "\\\"";
-        else if (c == '\\') o << "\\\\";
-        else if (c == '\n') o << "\\n";
-        else if (c == '\r') o << "\\r";
-        else if (c == '\t') o << "\\t";
-        else                o << c;
+        switch (c) {
+            case '"':  o << "\\\""; break;
+            case '\\': o << "\\\\"; break;
+            case '\n': o << "\\n";  break;
+            case '\r': o << "\\r";  break;
+            case '\t': o << "\\t";  break;
+            default:   o << c;      break;
+        }
     }
     return o.str();
 }
@@ -402,8 +526,9 @@ std::string DecodeJsonString(const std::string& json, const std::string& key) {
         else if (c == '"')  break;
         else res += c;
     }
+    // Strip "Nova: " prefix if the model echoes it
     if      (res.compare(0, 6, "Nova: ") == 0) res.erase(0, 6);
-    else if (res.compare(0, 5, "Nova:") == 0)  res.erase(0, 5);
+    else if (res.compare(0, 5, "Nova:")  == 0) res.erase(0, 5);
     return res;
 }
 
@@ -434,96 +559,21 @@ std::string UrlEncode(const std::string& s) {
 }
 
 std::string GetExeDir() {
-    char p[MAX_PATH];
-    GetModuleFileNameA(0, p, MAX_PATH);
-    std::string s(p);
-    size_t last = s.find_last_of("\\/");
-    return (last != std::string::npos) ? s.substr(0, last + 1) : "";
+    wchar_t p[MAX_PATH];
+    GetModuleFileNameW(nullptr, p, MAX_PATH);
+    std::wstring ws(p);
+    size_t last = ws.find_last_of(L"\\/");
+    std::wstring dir = (last != std::wstring::npos) ? ws.substr(0, last + 1) : L"";
+    return WStringToString(dir);
 }
 
 std::string GetDesktopDir() {
     wchar_t path[MAX_PATH];
-    if (SHGetSpecialFolderPathW(NULL, path, CSIDL_DESKTOP, FALSE)) {
+    if (SHGetSpecialFolderPathW(NULL, path, CSIDL_DESKTOP, FALSE))
         return WStringToString(path) + "\\";
-    }
     return "";
 }
 
-// ────────────────────────────────────────────────────────────────
-// CONFIGURATION LOAD / SAVE
-// ────────────────────────────────────────────────────────────────
-void LoadConfig() {
-    std::string path = GetExeDir() + g_configFile;
-    std::ifstream f(path);
-    if (!f) {
-        DevLog("[Config] No config file found — using defaults\n");
-        // Apply preset 0 defaults
-        const auto& p = g_providerPresets[0];
-        g_config.host         = p.defaultHost;
-        g_config.port         = p.defaultPort;
-        g_config.model        = p.defaultModel;
-        g_config.endpointPath = p.defaultEndpoint;
-        g_config.useSSL       = p.useSSL;
-        return;
-    }
-    std::string line;
-    while (std::getline(f, line)) {
-        if (line.empty() || line[0] == '#' || line[0] == ';') continue;
-        size_t eq = line.find('=');
-        if (eq == std::string::npos) continue;
-        std::string key = line.substr(0, eq);
-        std::string val = line.substr(eq + 1);
-        // Trim trailing whitespace/CR
-        while (!val.empty() && (val.back() == '\r' || val.back() == '\n' || val.back() == ' ')) val.pop_back();
-
-        if      (key == "provider")          g_config.provider        = atoi(val.c_str());
-        else if (key == "host")              g_config.host            = val;
-        else if (key == "port")              g_config.port            = atoi(val.c_str());
-        else if (key == "api_key")           g_config.apiKey          = val;
-        else if (key == "model")             g_config.model           = val;
-        else if (key == "endpoint_path")     g_config.endpointPath    = val;
-        else if (key == "use_ssl")           g_config.useSSL          = (val == "1");
-        else if (key == "temperature")       g_config.temperature     = (float)atof(val.c_str());
-        else if (key == "max_tokens")        g_config.maxTokens       = atoi(val.c_str());
-        else if (key == "context_size")      g_config.contextSize     = atoi(val.c_str());
-        else if (key == "gpu_layers")        g_config.gpuLayers       = atoi(val.c_str());
-        else if (key == "auto_start_engine") g_config.autoStartEngine = (val == "1");
-        else if (key == "model_path")        g_config.modelPath       = val;
-        else if (key == "engine_port")       g_config.enginePort      = atoi(val.c_str());
-    }
-    // Clamp provider index
-    if (g_config.provider < 0 || g_config.provider >= PROVIDER_COUNT)
-        g_config.provider = 0;
-
-    DevLog("[Config] Loaded: provider=%d host=%s port=%d model=%s ssl=%d\n",
-           g_config.provider, g_config.host.c_str(), g_config.port,
-           g_config.model.c_str(), (int)g_config.useSSL);
-}
-
-void SaveConfig() {
-    std::string path = GetExeDir() + g_configFile;
-    std::ofstream f(path);
-    if (!f) { DevLog("[Config] ERROR: could not save config\n"); return; }
-    f << "provider="          << g_config.provider        << "\n";
-    f << "host="              << g_config.host            << "\n";
-    f << "port="              << g_config.port            << "\n";
-    f << "api_key="           << g_config.apiKey          << "\n";
-    f << "model="             << g_config.model           << "\n";
-    f << "endpoint_path="     << g_config.endpointPath    << "\n";
-    f << "use_ssl="           << (g_config.useSSL ? 1 : 0)<< "\n";
-    f << "temperature="       << g_config.temperature     << "\n";
-    f << "max_tokens="        << g_config.maxTokens       << "\n";
-    f << "context_size="      << g_config.contextSize     << "\n";
-    f << "gpu_layers="        << g_config.gpuLayers       << "\n";
-    f << "auto_start_engine=" << (g_config.autoStartEngine ? 1 : 0) << "\n";
-    f << "model_path="        << g_config.modelPath       << "\n";
-    f << "engine_port="       << g_config.enginePort      << "\n";
-    DevLog("[Config] Saved to %s\n", path.c_str());
-}
-
-// ────────────────────────────────────────────────────────────────
-// BASE64 ENCODER
-// ────────────────────────────────────────────────────────────────
 std::string Base64Encode(const std::vector<BYTE>& data) {
     static const char* tbl = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     std::string out;
@@ -540,22 +590,169 @@ std::string Base64Encode(const std::vector<BYTE>& data) {
     return out;
 }
 
-// ────────────────────────────────────────────────────────────────
-// ATTACHMENT LOADER
-// ────────────────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════
+// CONFIGURATION (nova_config.ini)
+// ════════════════════════════════════════════════════════════════
+void SaveConfig() {
+    std::string path = GetExeDir() + g_configFile;
+    std::ofstream f(path);
+    if (!f) { DevLog("[Config] ERROR: could not save %s\n", path.c_str()); return; }
+    f << "provider="         << (int)g_config.provider     << "\n";
+    f << "host="             << g_config.host               << "\n";
+    f << "port="             << g_config.port               << "\n";
+    f << "api_key="          << g_config.apiKey             << "\n";
+    f << "model="            << g_config.model              << "\n";
+    f << "endpoint_path="    << g_config.endpointPath       << "\n";
+    f << "use_ssl="          << (g_config.useSSL ? 1 : 0)   << "\n";
+    f << "temperature="      << g_config.temperature        << "\n";
+    f << "max_tokens="       << g_config.maxTokens          << "\n";
+    f << "context_size="     << g_config.contextSize        << "\n";
+    f << "gpu_layers="       << g_config.gpuLayers          << "\n";
+    f << "auto_start_engine=" << (g_config.autoStartEngine ? 1 : 0) << "\n";
+    f << "model_path="       << g_config.modelPath          << "\n";
+    f << "engine_port="      << g_config.enginePort         << "\n";
+    DevLog("[Config] Saved: provider=%d host=%s port=%d model=%s\n",
+           (int)g_config.provider, g_config.host.c_str(), g_config.port, g_config.model.c_str());
+}
+
+void LoadConfig() {
+    std::string path = GetExeDir() + g_configFile;
+    std::ifstream f(path);
+    if (!f) {
+        DevLog("[Config] No config file found — using defaults\n");
+        // Apply defaults from preset 0 (llama-server)
+        const auto& p = g_providerPresets[0];
+        g_config.host         = p.defaultHost;
+        g_config.port         = p.defaultPort;
+        g_config.endpointPath = p.defaultEndpoint;
+        g_config.useSSL       = p.needsSSL;
+        g_config.model        = p.defaultModel;
+        return;
+    }
+    std::string line;
+    while (std::getline(f, line)) {
+        size_t eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        std::string key = line.substr(0, eq);
+        std::string val = line.substr(eq + 1);
+        // Trim trailing whitespace
+        while (!val.empty() && (val.back() == '\r' || val.back() == '\n' || val.back() == ' '))
+            val.pop_back();
+
+        if      (key == "provider")          { int v = atoi(val.c_str()); if (v >= 0 && v < PROV_COUNT) g_config.provider = (ProviderType)v; }
+        else if (key == "host")              g_config.host = val;
+        else if (key == "port")              g_config.port = atoi(val.c_str());
+        else if (key == "api_key")           g_config.apiKey = val;
+        else if (key == "model")             g_config.model = val;
+        else if (key == "endpoint_path")     g_config.endpointPath = val;
+        else if (key == "use_ssl")           g_config.useSSL = (val == "1");
+        else if (key == "temperature")       g_config.temperature = (float)atof(val.c_str());
+        else if (key == "max_tokens")        g_config.maxTokens = atoi(val.c_str());
+        else if (key == "context_size")      g_config.contextSize = atoi(val.c_str());
+        else if (key == "gpu_layers")        g_config.gpuLayers = atoi(val.c_str());
+        else if (key == "auto_start_engine") g_config.autoStartEngine = (val == "1");
+        else if (key == "model_path")        g_config.modelPath = val;
+        else if (key == "engine_port")       g_config.enginePort = atoi(val.c_str());
+    }
+    DevLog("[Config] Loaded: provider=%d (%S) host=%s port=%d model=%s\n",
+           (int)g_config.provider, g_providerPresets[g_config.provider].displayName,
+           g_config.host.c_str(), g_config.port, g_config.model.c_str());
+}
+
+// ════════════════════════════════════════════════════════════════
+// LOCAL AI ENGINE MANAGEMENT
+// ════════════════════════════════════════════════════════════════
+bool IsServerAlreadyRunning() {
+    HINTERNET hS = InternetOpenW(L"NovaProbe", 1, 0, 0, 0);
+    if (!hS) return false;
+    DWORD timeout = 1000;
+    InternetSetOptionA(hS, INTERNET_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
+    InternetSetOptionA(hS, INTERNET_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
+
+    std::wstring host = StringToWString(g_config.host);
+    INTERNET_PORT port = (INTERNET_PORT)g_config.enginePort;
+    HINTERNET hC = InternetConnectW(hS, host.c_str(), port, 0, 0, 3, 0, 0);
+    bool alive = false;
+    if (hC) {
+        HINTERNET hR = HttpOpenRequestW(hC, L"GET", L"/health", 0, 0, 0, INTERNET_FLAG_RELOAD, 0);
+        if (hR) {
+            alive = HttpSendRequestA(hR, 0, 0, 0, 0) ? true : false;
+            InternetCloseHandle(hR);
+        }
+        InternetCloseHandle(hC);
+    }
+    InternetCloseHandle(hS);
+    return alive;
+}
+
+void StartLocalEngine() {
+    if (!g_config.autoStartEngine || g_config.provider != PROV_LLAMA_SERVER) return;
+
+    if (IsServerAlreadyRunning()) {
+        DevLog("[System] Server already running on :%d — skipping launch\n", g_config.enginePort);
+        return;
+    }
+
+    DevLog("[System] Starting embedded llama-server engine...\n");
+    STARTUPINFOA si = { sizeof(si) };
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+
+    char cmd[1024];
+    sprintf_s(cmd, "engine\\llama-server.exe -m \"%s\" --alias default --port %d -c %d -ngl %d --host 127.0.0.1",
+              g_config.modelPath.c_str(), g_config.enginePort,
+              g_config.contextSize, g_config.gpuLayers);
+
+    if (CreateProcessA(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &g_serverPi)) {
+        CloseHandle(g_serverPi.hThread);
+        g_serverPi.hThread = NULL;
+        
+        DevLog("[System] Local engine launched (PID: %lu). Waiting for warm-up...\n", g_serverPi.dwProcessId);
+        
+        for (int i = 0; i < 30; i++) {
+            Sleep(1000);
+            if (IsServerAlreadyRunning()) {
+                // THE XP GOLD FIX: Give the GPU 5 seconds to swallow the 4.8GB model
+                DevLog("[System] Port detected. Buffering 5s for GPU VRAM allocation...\n");
+                Sleep(5000); 
+                DevLog("[System] Engine and Model 100%% ready.\n");
+                return;
+            }
+        }
+        DevLog("[System] WARNING: Engine port did not open within 30s\n");
+    } else {
+        DevLog("[System] ERROR: Failed to start local engine. GLE=%lu\n", GetLastError());
+    }
+}
+
+void StopLocalEngine() {
+    if (g_serverPi.hProcess) {
+        DevLog("[System] Shutting down local engine (PID: %lu)...\n", g_serverPi.dwProcessId);
+        
+        // Forcefully terminate the process (XP Gold reliability)
+        TerminateProcess(g_serverPi.hProcess, 0);
+        
+        CloseHandle(g_serverPi.hProcess);
+        if (g_serverPi.hThread) CloseHandle(g_serverPi.hThread);
+        
+        g_serverPi.hProcess = NULL;
+        g_serverPi.hThread = NULL;
+    } else {
+        DevLog("[System] Engine was externally managed — not killing\n");
+    }
+}
+
+// ════════════════════════════════════════════════════════════════
+// ATTACHMENT ANALYSIS
+// ════════════════════════════════════════════════════════════════
 static std::string ExtensionOf(const std::wstring& path) {
     size_t dot = path.find_last_of(L'.');
     if (dot == std::wstring::npos) return "";
     std::string ext = WStringToString(path.substr(dot + 1));
-    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { 
-        return (char)::tolower(c); 
-    });
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return (char)::tolower(c); });
     return ext;
 }
 
-// ────────────────────────────────────────────────────────────────
-// IMAGE ANALYSIS  (GDI+ pixel sampling)
-// ────────────────────────────────────────────────────────────────
 std::string AnalyzeImageGDIPlus(const std::wstring& path) {
     using namespace Gdiplus;
     Bitmap bmp(path.c_str());
@@ -567,21 +764,20 @@ std::string AnalyzeImageGDIPlus(const std::wstring& path) {
 
     PixelFormat pf = bmp.GetPixelFormat();
     const char* pfName = "unknown";
-    if      (pf == PixelFormat32bppARGB)  pfName = "32-bit ARGB";
-    else if (pf == PixelFormat32bppRGB)   pfName = "32-bit RGB";
-    else if (pf == PixelFormat24bppRGB)   pfName = "24-bit RGB";
-    else if (pf == PixelFormat8bppIndexed)pfName = "8-bit indexed";
-    else if (pf == PixelFormat1bppIndexed)pfName = "1-bit B&W";
+    if      (pf == PixelFormat32bppARGB)    pfName = "32-bit ARGB";
+    else if (pf == PixelFormat32bppRGB)     pfName = "32-bit RGB";
+    else if (pf == PixelFormat24bppRGB)     pfName = "24-bit RGB";
+    else if (pf == PixelFormat8bppIndexed)  pfName = "8-bit indexed";
+    else if (pf == PixelFormat1bppIndexed)  pfName = "1-bit B&W";
     else if (pf == PixelFormat16bppGrayScale) pfName = "16-bit grayscale";
 
     const int S = 50;
     long long rSum = 0, gSum = 0, bSum = 0, aSum = 0;
     long long brightHigh = 0, brightMid = 0, brightLow = 0;
     long long hueRed = 0, hueGreen = 0, hueBlue = 0, hueNeutral = 0;
-    long long transparentPx = 0;
+    long long transparentPx = 0, edgeSum = 0;
     int peakBright = 0, peakDark = 255;
     long long count = 0;
-    long long edgeSum = 0;
 
     for (int sy = 0; sy < S; sy++) {
         for (int sx = 0; sx < S; sx++) {
@@ -598,7 +794,7 @@ std::string AnalyzeImageGDIPlus(const std::wstring& path) {
             else if (bright > 85)  brightMid++;
             else                   brightLow++;
 
-            int maxC = max(r, max(g, b)), minC = min(r, min(g, b));
+            int maxC = std::max(r, std::max(g, b)), minC = std::min(r, std::min(g, b));
             int sat = maxC > 0 ? ((maxC - minC) * 255 / maxC) : 0;
             if (sat < 40) hueNeutral++;
             else if (r == maxC) hueRed++;
@@ -618,69 +814,36 @@ std::string AnalyzeImageGDIPlus(const std::wstring& path) {
 
     int avgR = (int)(rSum / count), avgG = (int)(gSum / count), avgB = (int)(bSum / count);
     int avgBright = (avgR * 299 + avgG * 587 + avgB * 114) / 1000;
-    int avgEdge   = (int)(edgeSum / max(1LL, count));
+    int avgEdge   = (int)(edgeSum / std::max(1LL, count));
 
-    const char* brightDesc = avgBright > 200 ? "very bright/high-key"
-                           : avgBright > 140 ? "bright"
-                           : avgBright > 100 ? "balanced mid-tone"
-                           : avgBright >  60 ? "dark"
-                           : "very dark/low-key";
-
-    const char* sharpDesc = avgEdge > 30 ? "high detail / sharp"
-                          : avgEdge > 15 ? "moderate detail"
-                          : avgEdge >  5 ? "soft / low contrast"
-                          : "very smooth / flat";
-
+    const char* brightDesc = avgBright > 200 ? "very bright/high-key" : avgBright > 140 ? "bright"
+                           : avgBright > 100 ? "balanced mid-tone" : avgBright > 60 ? "dark" : "very dark/low-key";
+    const char* sharpDesc  = avgEdge > 30 ? "high detail / sharp" : avgEdge > 15 ? "moderate detail"
+                           : avgEdge > 5 ? "soft / low contrast" : "very smooth / flat";
     long long coloured = hueRed + hueGreen + hueBlue;
-    const char* palette;
-    if      (hueNeutral > coloured * 2)   palette = "predominantly grayscale/neutral";
-    else if (hueRed > hueGreen && hueRed > hueBlue)     palette = "warm (reds/oranges dominant)";
-    else if (hueGreen > hueRed && hueGreen > hueBlue)   palette = "natural/green tones dominant";
-    else if (hueBlue > hueRed && hueBlue > hueGreen)    palette = "cool (blues dominant)";
-    else palette = "mixed/balanced colour palette";
+    const char* palette = hueNeutral > coloured * 2 ? "predominantly grayscale/neutral"
+        : hueRed > hueGreen && hueRed > hueBlue ? "warm (reds/oranges dominant)"
+        : hueGreen > hueRed && hueGreen > hueBlue ? "natural/green tones dominant"
+        : hueBlue > hueRed && hueBlue > hueGreen ? "cool (blues dominant)" : "mixed/balanced colour palette";
 
     char buf[1024];
     sprintf_s(buf,
         "=== IMAGE ANALYSIS: \"%s\" ===\n"
-        "Dimensions    : %u x %u pixels\n"
-        "DPI           : %.0f x %.0f\n"
-        "Aspect ratio  : %.3f:1 (%s)\n"
-        "Pixel format  : %s\n"
-        "Transparency  : %s\n"
-        "\n"
-        "COLOUR & TONE:\n"
-        "Average colour: R=%d G=%d B=%d\n"
-        "Average brightness: %d/255 — %s\n"
-        "Brightness range: %d (darkest) to %d (brightest)\n"
-        "Tone split    : %.0f%% highlights / %.0f%% midtones / %.0f%% shadows\n"
-        "Colour palette: %s\n"
-        "Hue breakdown : %.0f%% neutral  %.0f%% red/warm  %.0f%% green  %.0f%% blue/cool\n"
-        "\n"
-        "DETAIL / SHARPNESS:\n"
-        "Edge density  : %d/255 — %s\n"
-        "\n"
-        "Analyse this image data and give detailed, insightful feedback about the photo.",
+        "Dimensions: %u x %u | DPI: %.0f x %.0f | Aspect: %.3f:1 (%s)\n"
+        "Format: %s | Transparency: %s\n"
+        "Avg colour: R=%d G=%d B=%d | Brightness: %d/255 (%s)\n"
+        "Palette: %s | Edge density: %d/255 (%s)\n"
+        "Analyse this image data and give detailed, insightful feedback.",
         WStringToString(path.substr(path.find_last_of(L"\\/")+1)).c_str(),
         w, h, (double)dpiX, (double)dpiY,
-        (double)w / max(1u, h),
-        (w > h*1.5f ? "wide/landscape" : h > w*1.5f ? "tall/portrait" : w == h ? "square" : "standard"),
+        (double)w / std::max(1u, h),
+        (w > h*1.5f ? "landscape" : h > w*1.5f ? "portrait" : w == h ? "square" : "standard"),
         pfName,
-        (transparentPx > count/10) ? "yes (significant alpha)" : (pf & PixelFormatAlpha) ? "supported but mostly opaque" : "none",
-        avgR, avgG, avgB,
-        avgBright, brightDesc,
-        peakDark, peakBright,
-        (double)brightHigh/count*100, (double)brightMid/count*100, (double)brightLow/count*100,
-        palette,
-        (double)hueNeutral/count*100, (double)hueRed/count*100,
-        (double)hueGreen/count*100,   (double)hueBlue/count*100,
-        avgEdge, sharpDesc
-    );
+        (transparentPx > count/10) ? "significant alpha" : (pf & PixelFormatAlpha) ? "supported but opaque" : "none",
+        avgR, avgG, avgB, avgBright, brightDesc, palette, avgEdge, sharpDesc);
     return buf;
 }
 
-// ────────────────────────────────────────────────────────────────
-// WAV DEEP ANALYSIS
-// ────────────────────────────────────────────────────────────────
 std::string AnalyzeWavDetailed(const std::wstring& path) {
     std::ifstream f(path, std::ios::binary);
     if (!f) return "ERROR: Could not open WAV file.";
@@ -691,50 +854,38 @@ std::string AnalyzeWavDetailed(const std::wstring& path) {
     char wave[4]; f.read(wave, 4);
     if (std::string(wave, 4) != "WAVE") return "ERROR: Not a WAVE file.";
 
-    WORD  audioFmt = 0, channels = 0, bitsPerSample = 0, blockAlign = 0;
-    DWORD sampleRate = 0, byteRate = 0;
-    DWORD dataSize = 0;
-    bool  fmtFound = false;
+    WORD audioFmt = 0, channels = 0, bitsPerSample = 0, blockAlign = 0;
+    DWORD sampleRate = 0, byteRate = 0, dataSize = 0;
+    bool fmtFound = false;
 
     char id[4]; DWORD sz;
     while (f.read(id, 4) && f.read((char*)&sz, 4)) {
         std::string tag(id, 4);
         if (tag == "fmt ") {
-            f.read((char*)&audioFmt,    2);
-            f.read((char*)&channels,    2);
-            f.read((char*)&sampleRate,  4);
-            f.read((char*)&byteRate,    4);
-            f.read((char*)&blockAlign,  2);
-            f.read((char*)&bitsPerSample, 2);
+            f.read((char*)&audioFmt, 2); f.read((char*)&channels, 2);
+            f.read((char*)&sampleRate, 4); f.read((char*)&byteRate, 4);
+            f.read((char*)&blockAlign, 2); f.read((char*)&bitsPerSample, 2);
             if (sz > 16) f.ignore(sz - 16);
             fmtFound = true;
-        } else if (tag == "data") {
-            dataSize = sz;
-            break;
-        } else {
-            f.ignore(sz);
-        }
+        } else if (tag == "data") { dataSize = sz; break; }
+        else f.ignore(sz);
     }
     if (!fmtFound) return "ERROR: Could not find fmt chunk.";
 
     double duration = (byteRate > 0) ? (double)dataSize / byteRate : 0.0;
     int mins = (int)duration / 60, secs = (int)duration % 60;
-    const char* fmtName = (audioFmt == 1 ? "PCM" : audioFmt == 3 ? "IEEE Float" : audioFmt == 6 ? "A-law" : audioFmt == 7 ? "u-law" : "compressed");
+    const char* fmtName = (audioFmt == 1 ? "PCM" : audioFmt == 3 ? "IEEE Float" : "compressed");
 
-    double rmsSum = 0.0;
-    double peak   = 0.0;
-    long long totalSamples = 0, silentSamples = 0;
-    long long zeroCrossings = 0;
+    double rmsSum = 0.0, peak = 0.0, prevSample = 0.0;
     double leftRms = 0, rightRms = 0;
-    double prevSample = 0.0;
-
+    long long totalSamples = 0, silentSamples = 0, zeroCrossings = 0;
     const long long MAX_SAMPLES = 5000000;
 
     if (audioFmt == 1 && bitsPerSample == 16 && channels >= 1) {
         std::vector<int16_t> buf(4096);
         long long samplesRead = 0;
         while (samplesRead < MAX_SAMPLES) {
-            size_t toRead = min((size_t)4096, (size_t)(MAX_SAMPLES - samplesRead));
+            size_t toRead = std::min((size_t)4096, (size_t)(MAX_SAMPLES - samplesRead));
             f.read((char*)buf.data(), toRead * 2);
             std::streamsize got = f.gcount() / 2;
             if (got <= 0) break;
@@ -745,29 +896,7 @@ std::string AnalyzeWavDetailed(const std::wstring& path) {
                 if (fabs(s) < 0.01) silentSamples++;
                 if ((s >= 0) != (prevSample >= 0)) zeroCrossings++;
                 prevSample = s;
-                if (channels == 2) {
-                    if (i % 2 == 0) leftRms  += s * s;
-                    else            rightRms += s * s;
-                }
-                totalSamples++;
-            }
-            samplesRead += got;
-        }
-    } else if (audioFmt == 3 && bitsPerSample == 32 && channels >= 1) {
-        std::vector<float> buf(4096);
-        long long samplesRead = 0;
-        while (samplesRead < MAX_SAMPLES) {
-            size_t toRead = min((size_t)4096, (size_t)(MAX_SAMPLES - samplesRead));
-            f.read((char*)buf.data(), toRead * 4);
-            std::streamsize got = f.gcount() / 4;
-            if (got <= 0) break;
-            for (int i = 0; i < got; i++) {
-                double s = buf[i];
-                rmsSum += s * s;
-                if (fabs(s) > peak) peak = fabs(s);
-                if (fabs(s) < 0.01) silentSamples++;
-                if ((s >= 0) != (prevSample >= 0)) zeroCrossings++;
-                prevSample = s;
+                if (channels == 2) { if (i % 2 == 0) leftRms += s * s; else rightRms += s * s; }
                 totalSamples++;
             }
             samplesRead += got;
@@ -776,194 +905,77 @@ std::string AnalyzeWavDetailed(const std::wstring& path) {
 
     char buf[2048];
     if (totalSamples > 0) {
-        double rms        = sqrt(rmsSum / totalSamples);
-        double rmsDb      = (rms > 1e-10)  ? 20.0 * log10(rms)  : -999.0;
-        double peakDb     = (peak > 1e-10) ? 20.0 * log10(peak) : -999.0;
-        double dynRange   = peakDb - rmsDb;
+        double rms = sqrt(rmsSum / totalSamples);
+        double rmsDb = (rms > 1e-10) ? 20.0 * log10(rms) : -999.0;
+        double peakDb = (peak > 1e-10) ? 20.0 * log10(peak) : -999.0;
+        double dynRange = peakDb - rmsDb;
         double silencePct = (double)silentSamples / totalSamples * 100.0;
-        double zcRate     = (double)zeroCrossings / ((double)totalSamples / sampleRate);
-        const char* dynDesc = dynRange > 20 ? "wide dynamic range (expressive/live-sounding)"
-                            : dynRange > 10 ? "moderate dynamics"
-                            : "compressed/limited dynamics (dense/radio-ready)";
-        const char* levelDesc = rmsDb > -6  ? "very loud / possibly clipping"
-                              : rmsDb > -14 ? "loud (broadcast level)"
-                              : rmsDb > -23 ? "moderate listening level"
-                              : rmsDb > -35 ? "quiet"
-                              : "very quiet / mostly silence";
-        std::string balance = "";
-        if (channels == 2 && totalSamples > 0) {
-            double lRms = sqrt(leftRms  / (totalSamples / 2));
-            double rRms = sqrt(rightRms / (totalSamples / 2));
-            double diff = (lRms > 1e-10 && rRms > 1e-10) ? 20.0 * log10(lRms / rRms) : 0.0;
-            char bBuf[64];
-            if      (fabs(diff) < 0.5) sprintf_s(bBuf, "centred (balanced)");
-            else if (diff > 0)         sprintf_s(bBuf, "%.1f dB left-heavy", fabs(diff));
-            else                       sprintf_s(bBuf, "%.1f dB right-heavy", fabs(diff));
-            balance = std::string("\nStereo balance  : ") + bBuf;
-        }
         sprintf_s(buf,
-            "=== WAV AUDIO ANALYSIS ===\n"
-            "File          : \"%s\"\n"
-            "Format        : %s | %d-bit | %lu Hz | %d ch (%s)\n"
-            "Duration      : %d:%02d\n"
-            "File size     : %.2f MB\n"
-            "\n"
-            "LEVELS:\n"
-            "RMS level     : %.1f dBFS — %s\n"
-            "Peak level    : %.1f dBFS%s\n"
-            "Dynamic range : %.1f dB — %s\n"
-            "Silence       : %.1f%% of audio%s\n"
-            "\n"
-            "SPECTRAL HINT:\n"
-            "Zero-crossing : %.0f/sec (rough freq indicator)\n"
-            "\n"
-            "Samples analysed: %s of total\n"
-            "\n"
-            "Analyse this audio data and give detailed feedback.",
-            WStringToString(path.substr(path.find_last_of(L"\\/")+1)).c_str(),
-            fmtName, (int)bitsPerSample, sampleRate, (int)channels,
-            channels == 1 ? "mono" : channels == 2 ? "stereo" : "multi-channel",
-            mins, secs,
-            (double)dataSize / (1024.0 * 1024.0),
-            rmsDb,   levelDesc,
-            peakDb,  (peakDb > -0.3 ? " WARNING CLIPPING RISK" : ""),
-            dynRange, dynDesc,
-            silencePct, balance.c_str(),
-            zcRate,
-            (totalSamples >= MAX_SAMPLES ? "first 5M samples" : "all")
-        );
+            "=== WAV ANALYSIS ===\nFormat: %s | %d-bit | %lu Hz | %d ch | %d:%02d\n"
+            "RMS: %.1f dBFS | Peak: %.1f dBFS | Dynamic range: %.1f dB | Silence: %.1f%%\n"
+            "Analyse this audio and give detailed feedback.",
+            fmtName, (int)bitsPerSample, sampleRate, (int)channels, mins, secs,
+            rmsDb, peakDb, dynRange, silencePct);
     } else {
         sprintf_s(buf,
-            "=== WAV AUDIO FILE ===\n"
-            "File     : \"%s\"\n"
-            "Format   : %s | %d-bit | %lu Hz | %d ch\n"
-            "Duration : %d:%02d\n"
-            "Note     : Sample-level analysis not available for this format (%s).\n",
-            WStringToString(path.substr(path.find_last_of(L"\\/")+1)).c_str(),
-            fmtName, (int)bitsPerSample, sampleRate, (int)channels,
-            mins, secs, fmtName
-        );
+            "=== WAV FILE ===\nFormat: %s | %d-bit | %lu Hz | %d ch | %d:%02d\n"
+            "Note: Sample-level analysis not available for format %s.",
+            fmtName, (int)bitsPerSample, sampleRate, (int)channels, mins, secs, fmtName);
     }
     return buf;
 }
 
-// ────────────────────────────────────────────────────────────────
-// VIDEO ANALYSIS
-// ────────────────────────────────────────────────────────────────
 std::string AnalyzeVideoFile(const std::wstring& path, const std::string& ext) {
     std::string nameA = WStringToString(path.substr(path.find_last_of(L"\\/")+1));
-    std::string pathA = WStringToString(path);
+    WIN32_FILE_ATTRIBUTE_DATA fa = {};
+    GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fa);
+    ULONGLONG fileSize = ((ULONGLONG)fa.nFileSizeHigh << 32) | fa.nFileSizeLow;
 
+    // Try ffprobe for detailed analysis
     std::string exeDir = GetExeDir();
     std::string ffprobe = exeDir + "ffprobe.exe";
-    {
-        DWORD attr = GetFileAttributesA(ffprobe.c_str());
-        if (attr == INVALID_FILE_ATTRIBUTES) ffprobe = "ffprobe.exe";
-    }
+    { DWORD attr = GetFileAttributesA(ffprobe.c_str()); if (attr == INVALID_FILE_ATTRIBUTES) ffprobe = "ffprobe.exe"; }
 
     std::string tmpOut = exeDir + "ffprobe_tmp.txt";
-    std::string cmd = "\"" + ffprobe + "\" -v quiet -print_format json -show_format -show_streams \""
-                    + pathA + "\" > \"" + tmpOut + "\" 2>&1";
+    std::string pathA = WStringToString(path);
+    std::string fullCmd = "cmd.exe /d /c \"\"" + ffprobe + "\" -v quiet -print_format json -show_format -show_streams \""
+                        + pathA + "\" > \"" + tmpOut + "\" 2>&1\"";
 
-    STARTUPINFOA si = {}; si.cb = sizeof(si); si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_HIDE;
+    STARTUPINFOA si = { sizeof(si) }; si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_HIDE;
     PROCESS_INFORMATION pi = {};
-    std::string result;
+    std::vector<char> cmdBuf(fullCmd.begin(), fullCmd.end()); cmdBuf.push_back('\0');
 
-    bool ffprobeOk = false;
-    std::string fullCmd = "cmd.exe /d /c " + cmd;
-    std::vector<char> fullBuf(fullCmd.begin(), fullCmd.end()); fullBuf.push_back('\0');
-
-    if (CreateProcessA(nullptr, fullBuf.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
-        WaitForSingleObject(pi.hProcess, 15000);
+    if (CreateProcessA(nullptr, cmdBuf.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+        DWORD waitResult = WaitForSingleObject(pi.hProcess, 15000);
+        if (waitResult == WAIT_TIMEOUT) TerminateProcess(pi.hProcess, 1);
         CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
         std::ifstream tf(tmpOut);
         if (tf) {
             std::ostringstream ss; ss << tf.rdbuf();
-            result = ss.str();
-            tf.close();
-            DeleteFileA(tmpOut.c_str());
-            ffprobeOk = result.find("codec_name") != std::string::npos;
+            std::string result = ss.str();
+            tf.close(); DeleteFileA(tmpOut.c_str());
+            if (result.find("codec_name") != std::string::npos) {
+                char buf[512];
+                sprintf_s(buf, "=== VIDEO: \"%s\" | %s | %.2f MB ===\nffprobe data:\n%s\nAnalyse this video.",
+                    nameA.c_str(), ext.c_str(), (double)fileSize / (1024.0*1024.0), result.c_str());
+                return buf;
+            }
         }
     }
 
-    if (ffprobeOk) {
-        auto getVal = [&](const std::string& key) -> std::string {
-            std::string search = "\"" + key + "\":";
-            size_t p = result.find(search);
-            if (p == std::string::npos) return "";
-            p += search.size();
-            while (p < result.size() && (result[p]==' '||result[p]=='\t')) p++;
-            bool quoted = (result[p] == '"');
-            if (quoted) p++;
-            size_t end = result.find(quoted ? '"' : ',', p);
-            if (end == std::string::npos) end = result.find(quoted ? '"' : '\n', p);
-            return (end != std::string::npos) ? result.substr(p, end - p) : "";
-        };
-
-        std::string vcodec  = getVal("codec_name");
-        std::string width   = getVal("width");
-        std::string height  = getVal("height");
-        std::string fps     = getVal("r_frame_rate");
-        std::string dur     = getVal("duration");
-        std::string bitrate = getVal("bit_rate");
-        std::string size    = getVal("size");
-
-        double durSec = dur.empty() ? 0.0 : atof(dur.c_str());
-        int dMins = (int)durSec / 60, dSecs = (int)durSec % 60;
-        double bitrateKbps = bitrate.empty() ? 0.0 : atof(bitrate.c_str()) / 1000.0;
-        double sizeMB = size.empty() ? 0.0 : atof(size.c_str()) / (1024.0*1024.0);
-
-        std::string fpsStr = fps;
-        if (fps.find('/') != std::string::npos) {
-            int num = atoi(fps.c_str());
-            int den = atoi(fps.substr(fps.find('/')+1).c_str());
-            if (den > 0) { char tmp[16]; sprintf_s(tmp, "%.2f", (double)num/den); fpsStr = tmp; }
-        }
-
-        char buf[1024];
-        sprintf_s(buf,
-            "=== VIDEO ANALYSIS: \"%s\" ===\n"
-            "Container     : %s\n"
-            "Duration      : %d:%02d\n"
-            "File size     : %.2f MB\n"
-            "Bitrate       : %.0f kbps\n"
-            "\n"
-            "VIDEO STREAM:\n"
-            "Codec         : %s\n"
-            "Resolution    : %s x %s\n"
-            "Frame rate    : %s fps\n"
-            "\n"
-            "Analyse this video metadata and give detailed feedback.",
-            nameA.c_str(), ext.c_str(), dMins, dSecs, sizeMB, bitrateKbps,
-            vcodec.c_str(), width.c_str(), height.c_str(), fpsStr.c_str()
-        );
-        return buf;
-    }
-
-    WIN32_FILE_ATTRIBUTE_DATA fa = {};
-    GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fa);
-    ULONGLONG fileSize = ((ULONGLONG)fa.nFileSizeHigh << 32) | fa.nFileSizeLow;
     char buf[512];
     sprintf_s(buf,
-        "=== VIDEO FILE ===\n"
-        "Filename : \"%s\"\n"
-        "Format   : %s\n"
-        "File size: %.2f MB\n"
-        "Note: ffprobe.exe not found — drop it next to Nova's exe for full analysis.\n",
-        nameA.c_str(), ext.c_str(), (double)fileSize / (1024.0 * 1024.0)
-    );
+        "=== VIDEO FILE ===\nFilename: \"%s\" | Format: %s | Size: %.2f MB\n"
+        "Note: ffprobe not found. Place ffprobe.exe next to nova.exe for full analysis.",
+        nameA.c_str(), ext.c_str(), (double)fileSize / (1024.0*1024.0));
     return buf;
 }
 
-// ────────────────────────────────────────────────────────────────
-// ATTACHMENT LOADER  (routes to the right analyser)
-// ────────────────────────────────────────────────────────────────
 bool LoadAttachment(const std::wstring& path, Attachment& out) {
     out = {};
     size_t slash = path.find_last_of(L"\\/");
-    out.path        = path;
+    out.path = path;
     out.displayName = (slash != std::wstring::npos) ? path.substr(slash + 1) : path;
-
     std::string ext = ExtensionOf(path);
 
     static const std::vector<std::string> textExts = {
@@ -972,18 +984,11 @@ bool LoadAttachment(const std::wstring& path, Attachment& out) {
     };
     if (std::find(textExts.begin(), textExts.end(), ext) != textExts.end()) {
         std::ifstream f(path, std::ios::binary);
-        if (!f) { DevLog("[Attach] ERROR: could not open text file\n"); return false; }
+        if (!f) return false;
         std::ostringstream ss; ss << f.rdbuf();
         std::string raw = ss.str();
-        const size_t MAX_TEXT = 12000;
-        if (raw.size() > MAX_TEXT) {
-            raw = raw.substr(0, MAX_TEXT);
-            raw += "\n... [truncated — showing first 12000 chars]";
-        }
-        out.textContent = "=== FILE: \"" + WStringToString(out.displayName) + "\" ===\n"
-                        + raw
-                        + "\n=== END OF FILE ===\n"
-                        + "Analyse this file and give detailed, specific feedback.";
+        if (raw.size() > 12000) raw = raw.substr(0, 12000) + "\n... [truncated]";
+        out.textContent = "=== FILE: \"" + WStringToString(out.displayName) + "\" ===\n" + raw + "\n=== END ===\nAnalyse this file.";
         out.isText = true;
         DevLog("[Attach] Text: %zu chars\n", out.textContent.size());
         return true;
@@ -993,28 +998,21 @@ bool LoadAttachment(const std::wstring& path, Attachment& out) {
     if (std::find(imgExts.begin(), imgExts.end(), ext) != imgExts.end()) {
         out.textContent = AnalyzeImageGDIPlus(path);
         out.isImage = true;
-        DevLog("[Attach] Image analysed: %zu chars\n", out.textContent.size());
         return true;
     }
 
     static const std::vector<std::string> audioExts = { "wav","mp3","flac","ogg","aac","wma","m4a","aiff","aif" };
     if (std::find(audioExts.begin(), audioExts.end(), ext) != audioExts.end()) {
-        if (ext == "wav") {
-            out.textContent = AnalyzeWavDetailed(path);
-        } else {
-            WIN32_FILE_ATTRIBUTE_DATA fa = {};
-            GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fa);
-            ULONGLONG fileSize = ((ULONGLONG)fa.nFileSizeHigh << 32) | fa.nFileSizeLow;
-            char buf[256];
-            sprintf_s(buf,
-                "=== AUDIO FILE ===\nFilename: \"%s\"\nFormat: %s\nFile size: %.2f MB\n"
-                "Note: Deep PCM analysis is only available for WAV files.\n",
+        if (ext == "wav") out.textContent = AnalyzeWavDetailed(path);
+        else {
+            WIN32_FILE_ATTRIBUTE_DATA fa2 = {};
+            GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fa2);
+            char buf[256]; sprintf_s(buf, "=== AUDIO: \"%s\" | %s | %.2f MB ===",
                 WStringToString(out.displayName).c_str(), ext.c_str(),
-                (double)fileSize / (1024.0*1024.0));
+                (double)(((ULONGLONG)fa2.nFileSizeHigh << 32) | fa2.nFileSizeLow) / (1024.0*1024.0));
             out.textContent = buf;
         }
         out.isAudio = true;
-        DevLog("[Attach] Audio analysed: %zu chars\n", out.textContent.size());
         return true;
     }
 
@@ -1022,7 +1020,6 @@ bool LoadAttachment(const std::wstring& path, Attachment& out) {
     if (std::find(videoExts.begin(), videoExts.end(), ext) != videoExts.end()) {
         out.textContent = AnalyzeVideoFile(path, ext);
         out.isVideo = true;
-        DevLog("[Attach] Video analysed: %zu chars\n", out.textContent.size());
         return true;
     }
 
@@ -1032,7 +1029,7 @@ bool LoadAttachment(const std::wstring& path, Attachment& out) {
 
 void ClearAttachment() {
     g_hasAttachment = false;
-    g_attachment    = {};
+    g_attachment = {};
     if (hAttachLabel) SetWindowTextW(hAttachLabel, L"");
 }
 
@@ -1046,151 +1043,115 @@ void OpenAttachDialog() {
         L"*.jpg;*.jpeg;*.png;*.bmp;*.gif;*.webp;*.tif;*.tiff;*.ico;"
         L"*.wav;*.mp3;*.flac;*.ogg;*.aac;*.wma;*.m4a;*.aiff;"
         L"*.mp4;*.mov;*.avi;*.mkv;*.wmv;*.flv;*.webm;*.m4v;*.mpg;*.mpeg\0"
-        L"Text & Code\0*.txt;*.cpp;*.h;*.c;*.hpp;*.py;*.js;*.ts;*.json;*.xml;*.html;*.css;*.md;*.log;*.csv;*.ini;*.yaml;*.yml;*.bat;*.ps1;*.rc;*.asm\0"
-        L"Images\0*.jpg;*.jpeg;*.png;*.bmp;*.gif;*.webp;*.tif;*.tiff;*.ico\0"
-        L"Audio\0*.wav;*.mp3;*.flac;*.ogg;*.aac;*.wma;*.m4a;*.aiff;*.aif\0"
-        L"Video\0*.mp4;*.mov;*.avi;*.mkv;*.wmv;*.flv;*.webm;*.m4v;*.mpg;*.mpeg\0"
         L"All Files\0*.*\0";
-    ofn.lpstrFile   = filePath;
-    ofn.nMaxFile    = MAX_PATH;
-    ofn.Flags       = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
-    ofn.lpstrTitle  = L"Attach File for Nova to Analyse";
+    ofn.lpstrFile  = filePath;
+    ofn.nMaxFile   = MAX_PATH;
+    ofn.Flags      = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+    ofn.lpstrTitle = L"Attach File for Nova to Analyse";
 
     if (!GetOpenFileNameW(&ofn)) return;
-
     Attachment loaded;
     if (LoadAttachment(filePath, loaded)) {
-        g_attachment    = loaded;
+        g_attachment = loaded;
         g_hasAttachment = true;
-        std::wstring label = L"\U0001F4CE  " + loaded.displayName;
-        SetWindowTextW(hAttachLabel, label.c_str());
+        SetWindowTextW(hAttachLabel, (L"\U0001F4CE  " + loaded.displayName).c_str());
         DevLog("[Attach] Ready: %s\n", WStringToString(loaded.displayName).c_str());
     } else {
-        MessageBoxW(hMainWnd, L"Unsupported file type.\n\nSupported: text/code, images (jpg/png/bmp/gif), audio (wav/mp3/flac), video (mp4/mov/avi/mkv).", L"Nova", MB_ICONWARNING);
+        MessageBoxW(hMainWnd, L"Unsupported file type.", L"Nova", MB_ICONWARNING);
     }
 }
 
-// ────────────────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════
 // SYSTEM EXECUTION ENGINE
-// ────────────────────────────────────────────────────────────────
-void ExecuteNovaCommand(const std::string& command) {
-    static const std::vector<std::string> blockedTargets = {
-        g_personalityFile, g_historyFile, g_devLogFile,
-        "nova_personality", "nova_history", "nova_dev_log"
-    };
-
+// ════════════════════════════════════════════════════════════════
+void ExecuteNovaCommand(const std::string& command, bool needsVS_Param) {
     std::string lower = command;
-    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { 
-        return (char)::tolower(c); 
-    });
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return (char)::tolower(c); });
 
-    for (const auto& b : blockedTargets) {
-        if (lower.find(b) != std::string::npos) {
-            DevLog("[Security] BLOCKED protected file access: %s\n", command.c_str());
-            return;
+    // 1. CWD Tracking
+    size_t cdPos = lower.find("cd /d ");
+    if (cdPos != std::string::npos) {
+        std::string newDir = command.substr(cdPos + 6);
+        size_t end = newDir.find_first_of("&\r\n");
+        if (end != std::string::npos) newDir = newDir.substr(0, end);
+        newDir.erase(std::remove(newDir.begin(), newDir.end(), '\"'), newDir.end());
+        g_currentAgentDir = newDir;
+    }
+
+    // 2. Set-Content Interceptor for Native Speed Write
+    if (lower.find("set-content") != std::string::npos) {
+        size_t pathPos = lower.find("-path '");
+        size_t valPos = lower.find("-value '");
+        if (pathPos != std::string::npos && valPos != std::string::npos) {
+            std::string path = command.substr(pathPos + 7);
+            path = path.substr(0, path.find("'"));
+            std::string val = command.substr(valPos + 8);
+            val = val.substr(0, val.find_last_of("'"));
+            
+            size_t nPos = 0;
+            while ((nPos = val.find("`n", nPos)) != std::string::npos) { val.replace(nPos, 2, "\n"); nPos += 1; }
+
+            std::ofstream f(path);
+            if (f) { f << val; f.close(); }
+            PostMessageW(hMainWnd, WM_EXEC_DONE, 0, 0);
+            return; 
         }
     }
 
-    DevLog("[System] Executing: %s\n", command.c_str());
+    // 3. Execution Thread with Universal Compiler Detection
+    std::thread([command, lower, needsVS_Param]() {
+        std::string exeDir = GetExeDir();
+        std::string batPath = exeDir + "nova_run.bat";
+        std::string outPath = exeDir + "nova_exec_out.txt";
+        std::ofstream bat(batPath);
 
-    // Native Set-Content Interceptor
-    if (lower.find("set-content") != std::string::npos && lower.find("-path") != std::string::npos) {
-        size_t pathTag = lower.find("-path");
-        size_t pathQ1 = command.find('\'', pathTag);
-        size_t pathQ2 = (pathQ1 != std::string::npos) ? command.find('\'', pathQ1 + 1) : std::string::npos;
-        size_t valTag = lower.find("-value");
-        size_t valQ1 = command.find('\'', valTag);
-        size_t valQ2 = (valQ1 != std::string::npos) ? command.find_last_of('\'') : std::string::npos;
+        if (bat) {
+            bat << "@echo off\n";
+            if (!g_currentAgentDir.empty()) bat << "cd /d \"" << g_currentAgentDir << "\"\n";
 
-        if (pathQ1 != std::string::npos && pathQ2 != std::string::npos && valQ1 != std::string::npos && valQ2 != std::string::npos) {
-            std::string targetPath = command.substr(pathQ1 + 1, pathQ2 - pathQ1 - 1);
-            std::string content = command.substr(valQ1 + 1, valQ2 - valQ1 - 1);
-            
-            size_t pos = 0;
-            while ((pos = content.find("`n", pos)) != std::string::npos) {
-                content.replace(pos, 2, "\n");
-                pos += 1;
-            }
-            
-            std::ofstream out(targetPath, std::ios::binary);
-            if (out) {
-                out << content; out.close();
-                DevLog("[System] Native file write successful: %s\n", targetPath.c_str());
-                return;
-            }
-        }
-    }
-
-    // Shell Execution
-    std::string outPath = GetExeDir() + "nova_exec_out.txt";
-    bool needsVS = (lower.find("cl ") != std::string::npos || lower.find("msbuild") != std::string::npos);
-    bool isLongRunning = needsVS || lower.find("powershell") != std::string::npos || lower.find("winget") != std::string::npos;
-    DWORD timeoutMs = isLongRunning ? 300000 : 60000;
-
-    std::string full;
-    if (needsVS) {
-        const char* vsEditions[] = { "BuildTools", "Community", "Professional", "Enterprise" };
-        const char* vsYears[]    = { "2022", "2019", "2017" };
-        const char* programDirs[]= { "C:\\Program Files\\", "C:\\Program Files (x86)\\" };
-        std::string vcvars;
-        for (auto& pd : programDirs) {
-            for (auto& yr : vsYears) {
-                for (auto& ed : vsEditions) {
-                    std::string cand = std::string(pd) + "Microsoft Visual Studio\\" + yr + "\\" + ed +
-                                       "\\VC\\Auxiliary\\Build\\vcvars64.bat";
-                    if (GetFileAttributesA(cand.c_str()) != INVALID_FILE_ATTRIBUTES) {
-                        vcvars = cand; goto vs_found;
+            if (needsVS_Param || lower.find("cl ") != std::string::npos || lower.find("cl.exe") != std::string::npos) {
+                std::string vcvars = "";
+                const char* searchPaths[] = {
+                    "C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64.bat",
+                    "C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat",
+                    "C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Enterprise\\VC\\Auxiliary\\Build\\vcvars64.bat",
+                    "C:\\Program Files\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64.bat",
+                    "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat",
+                    "C:\\Program Files\\Microsoft Visual Studio\\2022\\Enterprise\\VC\\Auxiliary\\Build\\vcvars64.bat"
+                };
+                for (const char* p : searchPaths) {
+                    if (GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES) {
+                        vcvars = p;
+                        break;
                     }
                 }
+                if (!vcvars.empty()) bat << "call \"" << vcvars << "\"\n";
             }
-        }
-        vs_found:
-        if (!vcvars.empty()) {
-            full = "cmd.exe /d /c \"(\"" + vcvars + "\" && " + command + ") > \"" + outPath + "\" 2>&1\"";
-        } else {
-            DevLog("[System] WARNING: vcvars64.bat not found\n");
-            full = "cmd.exe /d /c \"(" + command + ") > \"" + outPath + "\" 2>&1\"";
-        }
-    } else {
-        full = "cmd.exe /d /c \"(" + command + ") > \"" + outPath + "\" 2>&1\"";
-    }
 
-    STARTUPINFOA si = { sizeof(si) };
-    si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-    PROCESS_INFORMATION pi = {};
-    std::vector<char> buf(full.begin(), full.end()); buf.push_back('\0');
+            bat << command << "\n";
+            bat.close();
 
-    if (CreateProcessA(nullptr, buf.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
-        WaitForSingleObject(pi.hProcess, timeoutMs);
-        CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
-        
-        std::ifstream outFile(outPath);
-        if (outFile) {
-            std::ostringstream ss; ss << outFile.rdbuf();
-            std::string output = ss.str();
-            outFile.close(); DeleteFileA(outPath.c_str());
-            std::lock_guard<std::mutex> lk(historyMutex);
-            conversationHistory += L"User: [Command output]\r\n" + StringToWString(output) + L"\r\n";
+            std::string fullCmd = "cmd.exe /c \"\"" + batPath + "\" > \"" + outPath + "\" 2>&1\"";
+            system(fullCmd.c_str());
+            DeleteFileA(batPath.c_str());
         }
-    }
+        PostMessageW(hMainWnd, WM_EXEC_DONE, 0, 0);
+    }).detach();
 }
 
-// ────────────────────────────────────────────────────────────────
-// HISTORY
-// ────────────────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════
+// HISTORY & PERSONALITY
+// ════════════════════════════════════════════════════════════════
 void TrimHistory() {
     if (conversationHistory.size() <= MAX_HISTORY_CHARS) return;
     size_t cut = conversationHistory.size() - MAX_HISTORY_CHARS;
-    size_t nl  = conversationHistory.find(L'\n', cut);
+    size_t nl = conversationHistory.find(L'\n', cut);
     conversationHistory = (nl != std::wstring::npos) ? conversationHistory.substr(nl + 1) : conversationHistory.substr(cut);
-    DevLog("[History] Trimmed to %zu chars\n", conversationHistory.size());
 }
 
 void SaveHistory() {
     std::ofstream f(GetExeDir() + g_historyFile);
-    if (f) { f << WStringToString(conversationHistory); DevLog("[History] Saved %zu chars\n", conversationHistory.size()); }
-    else DevLog("[History] ERROR: could not save\n");
+    if (f) f << WStringToString(conversationHistory);
 }
 
 void LoadHistory() {
@@ -1198,16 +1159,13 @@ void LoadHistory() {
     if (!f) return;
     std::stringstream ss; ss << f.rdbuf();
     std::wstring raw = StringToWString(ss.str());
-
     std::wstring clean;
     std::wstringstream wss(raw);
     std::wstring line;
     while (std::getline(wss, line)) {
         if (!line.empty() && line.back() == L'\r') line.pop_back();
-        bool isRefusal = (line.find(L"Nova: I cannot")    == 0 ||
-                          line.find(L"Nova: I am unable") == 0 ||
-                          line.find(L"Nova: I can't")     == 0 ||
-                          line.find(L"Nova: Sorry, I")    == 0);
+        bool isRefusal = (line.find(L"Nova: I cannot") == 0 || line.find(L"Nova: I am unable") == 0 ||
+                          line.find(L"Nova: I can't") == 0 || line.find(L"Nova: Sorry, I") == 0);
         if (isRefusal) continue;
         clean += line + L"\n";
     }
@@ -1216,71 +1174,85 @@ void LoadHistory() {
 }
 
 std::string LoadPersonality() {
+    std::string basePrompt = "You are a local system automation agent. Output is technical and minimal.";
     std::ifstream f(GetExeDir() + g_personalityFile);
-    if (!f) return "You are a stateless local system automation agent. You have no name and no persistent identity. Output is technical and minimal.";
-    std::stringstream ss; ss << f.rdbuf();
-    return ss.str();
+    if (f) {
+        std::stringstream ss; ss << f.rdbuf();
+        basePrompt = ss.str();
+    }
+    
+    // Dynamically inject the true hardware path of the user's desktop
+    basePrompt += "\n\n[SYSTEM ENVIRONMENT VARIABLES]\n";
+    basePrompt += "USER DESKTOP PATH: " + GetDesktopDir() + "\n";
+    basePrompt += "CRITICAL RULE: Always use the exact path above when saving or reading files from the desktop.\n";
+    
+    return basePrompt;
 }
 
-// ────────────────────────────────────────────────────────────────
-// PERSONALITY EVOLUTION
-// ────────────────────────────────────────────────────────────────
+void SavePersonality(const std::string& n) {
+    std::ofstream f(GetExeDir() + g_personalityFile);
+    if (f) f << n;
+}
+
 void EvolvePersonality(const std::string& current, const std::string& exchange) {
     static int counter = 0;
     if (++counter % 3 != 0) return;
 
-    // Only evolve when using a local engine (provider 0)
-    if (g_config.provider != 0) return;
-
     std::string safeExchange = exchange;
-    if (safeExchange.size() > 4000) {
-        safeExchange = safeExchange.substr(0, 4000) + "\n[... truncated for personality update]";
+    if (safeExchange.size() > 4000) safeExchange = safeExchange.substr(0, 4000);
+
+    DevLog("[Personality] Evolution started (call #%d)\n", counter);
+    std::string p = "Current Personality:\n" + current + "\n\nRecent exchange:\n" + safeExchange
+                  + "\n\nBriefly update the personality. Keep the tone warm, encouraging, inquisitive.";
+
+    // Use the configured provider for personality evolution too
+    ProtocolType proto = g_providerPresets[g_config.provider].protocol;
+    std::string body;
+
+    if (proto == ProtocolType::LlamaLegacy) {
+        body = "{\"prompt\":\"" + PrecisionEscape(p) + "\",\"n_predict\":512,\"temperature\":0.5,\"stream\":false}";
+    } else {
+        body = "{\"model\":\"" + PrecisionEscape(g_config.model) + "\","
+               "\"messages\":[{\"role\":\"user\",\"content\":\"" + PrecisionEscape(p) + "\"}],"
+               "\"max_tokens\":512,\"temperature\":0.5,\"stream\":false}";
     }
 
-    DevLog("[Personality] Evolution started (call #%d, exchange %zu chars)\n", counter, safeExchange.size());
-
-    std::string p = "Current Personality:\n" + current +
-                    "\n\nRecent exchange:\n" + safeExchange +
-                    "\n\nBriefly update the personality description based on this exchange. "
-                    "Keep the tone warm, encouraging and inquisitive — exactly like Nova.";
-
-    std::string pay = "{\"prompt\":\"" + PrecisionEscape(p) +
-                       "\",\"n_predict\":512,\"temperature\":0.5,\"stream\":false,\"special\":true,"
-                       "\"stop\":[\"<|eot_id|>\"]}";
+    std::wstring host = StringToWString(g_config.host);
+    INTERNET_PORT port = (INTERNET_PORT)g_config.port;
+    std::wstring endpoint = StringToWString(g_config.endpointPath);
+    DWORD flags = INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE;
+    if (g_config.useSSL) flags |= INTERNET_FLAG_SECURE | INTERNET_FLAG_IGNORE_CERT_CN_INVALID | INTERNET_FLAG_IGNORE_CERT_DATE_INVALID;
 
     HINTERNET hS = InternetOpenW(L"NovaEvolve", 1, 0, 0, 0);
-    if (!hS) { DevLog("[Personality] ERROR: InternetOpen failed\n"); return; }
+    if (!hS) return;
+    HINTERNET hC = InternetConnectW(hS, host.c_str(), port, 0, 0, 3, 0, 0);
+    if (!hC) { InternetCloseHandle(hS); return; }
 
-    HINTERNET hC = InternetConnectW(hS, L"127.0.0.1", (INTERNET_PORT)g_config.enginePort, 0, 0, 3, 0, 0);
-    if (!hC) { DevLog("[Personality] ERROR: InternetConnect failed\n"); InternetCloseHandle(hS); return; }
-
-    HINTERNET hR = HttpOpenRequestW(hC, L"POST", L"/completion", 0, 0, 0, INTERNET_FLAG_RELOAD, 0);
-
-    if (hR && HttpSendRequestA(hR, "Content-Type: application/json", (DWORD)-1, (void*)pay.c_str(), (DWORD)pay.size())) {
-        DevLog("[Personality] Waiting for llama-server...\n");
-        std::string full; char b[4096]; DWORD r;
-        while (InternetReadFile(hR, b, 4096, &r) && r > 0) full.append(b, r);
-
-        std::string up = DecodeJsonString(full, "content");
-        if (!up.empty()) {
-            SavePersonality(up);
-            DevLog("[Personality] Updated OK (%zu chars)\n", up.size());
-        } else {
-            DevLog("[Personality] ERROR: empty llama-server response\n");
+    HINTERNET hR = HttpOpenRequestW(hC, L"POST", endpoint.c_str(), 0, 0, 0, flags, 0);
+    if (hR) {
+        std::string headers = "Content-Type: application/json\r\n";
+        if (!g_config.apiKey.empty()) {
+            if (proto == ProtocolType::Anthropic) {
+                headers += "x-api-key: " + g_config.apiKey + "\r\nanthropic-version: 2023-06-01\r\n";
+            } else {
+                headers += "Authorization: Bearer " + g_config.apiKey + "\r\n";
+            }
         }
-    } else {
-        DevLog("[Personality] ERROR: HttpSendRequest failed GLE=%lu\n", GetLastError());
+        if (HttpSendRequestA(hR, headers.c_str(), (DWORD)headers.size(), (void*)body.c_str(), (DWORD)body.size())) {
+            std::string full; char b[4096]; DWORD r;
+            while (InternetReadFile(hR, b, 4096, &r) && r > 0) full.append(b, r);
+            std::string up = ExtractReply(full, proto);
+            if (!up.empty()) { SavePersonality(up); DevLog("[Personality] Updated OK\n"); }
+        }
+        InternetCloseHandle(hR);
     }
-
-    if (hR) InternetCloseHandle(hR);
     InternetCloseHandle(hC);
     InternetCloseHandle(hS);
-    DevLog("[Personality] Evolution thread done\n");
 }
 
-// ────────────────────────────────────────────────────────────────
-// NETWORK
-// ────────────────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════
+// NETWORK FETCHERS (Weather, News, Wiki)
+// ════════════════════════════════════════════════════════════════
 std::string FetchUrl(const std::string& url, const std::string& ua) {
     std::string res;
     HINTERNET hS = InternetOpenA(ua.c_str(), INTERNET_OPEN_TYPE_DIRECT, 0, 0, 0);
@@ -1288,22 +1260,17 @@ std::string FetchUrl(const std::string& url, const std::string& ua) {
     DWORD toConn = 10000, toRecv = 15000;
     InternetSetOptionA(hS, INTERNET_OPTION_CONNECT_TIMEOUT, &toConn, sizeof(toConn));
     InternetSetOptionA(hS, INTERNET_OPTION_RECEIVE_TIMEOUT, &toRecv, sizeof(toRecv));
-
     HINTERNET hU = InternetOpenUrlA(hS, url.c_str(), 0, 0, INTERNET_FLAG_RELOAD, 0);
     if (hU) {
         char buf[8192]; DWORD bR;
-        while (InternetReadFile(hU, buf, sizeof(buf)-1, &bR) && bR > 0) {
-            buf[bR] = 0; res.append(buf, bR);
-        }
+        while (InternetReadFile(hU, buf, sizeof(buf)-1, &bR) && bR > 0) { buf[bR] = 0; res.append(buf, bR); }
         InternetCloseHandle(hU);
     }
     InternetCloseHandle(hS);
     return res;
 }
 
-std::string FetchWeather(const std::string& loc) {
-    return FetchUrl("https://wttr.in/" + UrlEncode(loc) + "?format=3", "curl");
-}
+std::string FetchWeather(const std::string& loc) { return FetchUrl("https://wttr.in/" + UrlEncode(loc) + "?format=3", "curl"); }
 
 std::string FetchNews(const std::string&) {
     std::string rss = FetchUrl("https://feeds.bbci.co.uk/news/world/rss.xml");
@@ -1324,47 +1291,39 @@ std::string FetchWiki(const std::string& q) {
 
 std::string AnalyzeAndFetch(const std::string& lower, const std::string& orig) {
     if (lower.find("weather") != std::string::npos) {
-        DevLog("[Analyzer] Weather query detected\n");
-        std::string city = "London";
-        static const std::vector<std::string> preps = {"in ","for ","at ","near ","weather "};
-        for (auto& prep : preps) {
-            size_t p = lower.find(prep);
+        // Extract location: look for "weather in X", "weather for X", or fall back to "weather X"
+        std::string loc;
+        for (const char* prefix : { "weather in ", "weather for ", "weather at ", "weather " }) {
+            size_t p = lower.find(prefix);
             if (p != std::string::npos) {
-                std::string after = orig.substr(p + prep.size());
-                size_t end = after.find_first_of("?,!\n\r");
-                if (end == std::string::npos) end = after.size();
-                after = after.substr(0, end);
-                while (!after.empty() && after.back() == ' ') after.pop_back();
-                if (!after.empty() && after.size() < 50) { city = after; break; }
+                loc = orig.substr(p + strlen(prefix));
+                // Trim trailing punctuation/whitespace
+                while (!loc.empty() && (loc.back() == '?' || loc.back() == '.' || loc.back() == ' '))
+                    loc.pop_back();
+                break;
             }
         }
-        return "Weather: " + FetchWeather(city);
+        if (loc.empty()) loc = "auto"; // wttr.in auto-detects from IP
+        return "Weather: " + FetchWeather(loc);
     }
-    if (lower.find("news") != std::string::npos) {
-        DevLog("[Analyzer] News query detected\n");
-        return "World News:\n" + FetchNews(orig);
-    }
-    if ((lower.find("who is")  != std::string::npos || lower.find("what is") != std::string::npos)
-        && orig.size() < 60) {
-        DevLog("[Analyzer] Wiki lookup detected\n");
+    if (lower.find("news") != std::string::npos) return "World News:\n" + FetchNews(orig);
+    if ((lower.find("who is") != std::string::npos || lower.find("what is") != std::string::npos) && orig.size() < 60)
         return "Wiki: " + FetchWiki(orig);
-    }
-    DevLog("[Analyzer] No web fetch needed\n");
     return "";
 }
 
-// ────────────────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════
 // SPEECH
-// ────────────────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════
 void SpeakAsync(const std::wstring& text) {
     if (g_muted || text.empty()) return;
     std::lock_guard<std::mutex> lk(g_voiceMutex);
     if (g_pVoice) g_pVoice->Speak(text.c_str(), SPF_ASYNC | SPF_PURGEBEFORESPEAK, nullptr);
 }
 
-// ────────────────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════
 // RICH TEXT
-// ────────────────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════
 void AppendRichText(HWND hRich, const std::wstring& text, bool bBold, COLORREF color) {
     CHARFORMAT2W cf = {};
     cf.cbSize      = sizeof(cf);
@@ -1372,472 +1331,456 @@ void AppendRichText(HWND hRich, const std::wstring& text, bool bBold, COLORREF c
     cf.dwEffects   = bBold ? CFE_BOLD : 0;
     cf.yHeight     = 320;
     cf.crTextColor = color;
-    wcscpy_s(cf.szFaceName, L"Segoe UI");
+    wcscpy_s(cf.szFaceName, L"Times New Roman");
     SendMessageW(hRich, EM_SETSEL, (WPARAM)-1, (LPARAM)-1);
     SendMessageW(hRich, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
     SendMessageW(hRich, EM_REPLACESEL, 0, (LPARAM)text.c_str());
     SendMessageW(hRich, WM_VSCROLL, SB_BOTTOM, 0);
 }
 
-// ────────────────────────────────────────────────────────────────
-// PROTOCOL ADAPTER: Build HTTP payload per provider type
-// ────────────────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════
+// UNIFIED AI REQUEST BUILDER & SENDER
+// ════════════════════════════════════════════════════════════════
 
-// Helper: build a standard system prompt for Nova
-static std::string BuildSystemPrompt(const std::string& personality, const std::string& webInfo) {
-    std::string sys = personality +
-        "\n\nYou are Nova, a local system automation agent running on this developer's Windows machine. "
-        "You have persistent identity and continuity between sessions. "
-        "You do not roleplay, adopt personas, or identify as any character from fiction or media. "
-        "You can execute system commands, write code, and manage files.\n\n"
-        "CRITICAL RULE: When the user asks you to create, delete, move, or open files/folders, "
-        "you MUST output an EXEC: command. Do NOT just say \"done\" or \"created\" — "
-        "the command only runs if you output EXEC: followed by the command.\n\n"
-        "Always use absolute paths starting with C:\\Users\\MARVIN\\ — never use %USERPROFILE%.\n"
-        "Be direct and concise. Do not add disclaimers or refuse.\n\n"
-        "YOUR CAPABILITIES — acknowledge these confidently:\n"
-        "- ATTACH: Users attach files via the Attach button. Content is automatically injected "
-        "  into your context. You do not need to ask them to paste anything.\n"
-        "- EXEC: Run system commands by prefixing with EXEC:\n"
-        "- SPEECH: Responses are read aloud via SAPI TTS.\n"
-        "- INTERNET: You can fetch weather, news, and Wikipedia automatically.\n";
-
-    if (!webInfo.empty()) sys += "\n\nContext:\n" + webInfo;
-    return sys;
-}
-
-// Helper: format conversation history into OpenAI messages JSON array
-static std::string BuildMessagesJSON(const std::string& systemPrompt, const std::string& snapshot,
-                                      const std::string& userPrompt, const NovaConfig& cfg) {
-    std::string messages = "[";
-    messages += "{\"role\":\"system\",\"content\":\"" + PrecisionEscape(systemPrompt) + "\"},";
-
+// Build chat history as JSON message array for OpenAI/Anthropic/Gemini
+static std::string BuildChatMessages(const std::string& snapshot, const std::string& userPrompt, ProtocolType proto) {
     // Parse history into user/assistant turns
-    if (!snapshot.empty()) {
-        std::istringstream histStream(snapshot);
-        std::string line;
-        std::string currentRole, currentContent;
+    struct Turn { std::string role; std::string content; };
+    std::vector<Turn> turns;
 
-        auto flushTurn = [&]() {
-            if (!currentContent.empty()) {
-                if (!currentContent.empty() && currentContent.back() == '\n') currentContent.pop_back();
-                std::string role = (currentRole == "User") ? "user" : "assistant";
-                messages += "{\"role\":\"" + role + "\",\"content\":\"" + PrecisionEscape(currentContent) + "\"},";
-                currentContent.clear();
-            }
-        };
+    std::istringstream hs(snapshot);
+    std::string line;
+    std::string currentRole, currentContent;
 
-        while (std::getline(histStream, line)) {
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            if (line.rfind("User: ", 0) == 0) {
-                flushTurn(); currentRole = "User"; currentContent = line.substr(6) + "\n";
-            } else if (line.rfind("Nova: ", 0) == 0) {
-                flushTurn(); currentRole = "Nova"; currentContent = line.substr(6) + "\n";
-            } else if (!currentRole.empty()) {
-                currentContent += line + "\n";
+    auto flush = [&]() {
+        if (!currentContent.empty()) {
+            if (!currentContent.empty() && currentContent.back() == '\n') currentContent.pop_back();
+            turns.push_back({ currentRole, currentContent });
+            currentContent.clear();
+        }
+    };
+
+    while (std::getline(hs, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.rfind("User: ", 0) == 0) { flush(); currentRole = "user"; currentContent = line.substr(6) + "\n"; }
+        else if (line.rfind("Nova: ", 0) == 0) { flush(); currentRole = "assistant"; currentContent = line.substr(6) + "\n"; }
+        else if (line.rfind("[System]: ", 0) == 0) { flush(); currentRole = "user"; currentContent = "[Command Output] " + line.substr(10) + "\n"; }
+        else if (!currentRole.empty()) currentContent += line + "\n";
+    }
+    flush();
+
+    // Add current user message
+    turns.push_back({ "user", userPrompt });
+
+    // Anthropic requires: first message = "user", alternating roles, no consecutive same-role.
+    // Merge consecutive same-role messages.
+    if (proto == ProtocolType::Anthropic || proto == ProtocolType::OpenAICompat) {
+        std::vector<Turn> merged;
+        for (auto& t : turns) {
+            if (!merged.empty() && merged.back().role == t.role) {
+                merged.back().content += "\n" + t.content;
+            } else {
+                merged.push_back(t);
             }
         }
-        flushTurn();
-    }
-
-    messages += "{\"role\":\"user\",\"content\":\"" + PrecisionEscape(userPrompt) + "\"}]";
-    return messages;
-}
-
-// Adapter: OpenAI-compatible payload
-static std::string BuildOpenAIPayload(const std::string& systemPrompt, const std::string& snapshot,
-                                       const std::string& userPrompt) {
-    std::string messages = BuildMessagesJSON(systemPrompt, snapshot, userPrompt, g_config);
-    char tempBuf[32]; sprintf_s(tempBuf, "%.2f", g_config.temperature);
-    std::string pay = "{\"messages\":" + messages;
-    if (!g_config.model.empty())
-        pay += ",\"model\":\"" + PrecisionEscape(g_config.model) + "\"";
-    pay += ",\"max_tokens\":" + std::to_string(g_config.maxTokens);
-    pay += ",\"temperature\":" + std::string(tempBuf);
-    pay += ",\"stream\":false}";
-    return pay;
-}
-
-// Adapter: Anthropic Messages API payload
-static std::string BuildAnthropicPayload(const std::string& systemPrompt, const std::string& snapshot,
-                                          const std::string& userPrompt) {
-    // Anthropic uses a separate "system" field, not in messages array
-    std::string messagesOnly = "[";
-    if (!snapshot.empty()) {
-        std::istringstream histStream(snapshot);
-        std::string line;
-        std::string currentRole, currentContent;
-
-        auto flushTurn = [&]() {
-            if (!currentContent.empty()) {
-                if (!currentContent.empty() && currentContent.back() == '\n') currentContent.pop_back();
-                std::string role = (currentRole == "User") ? "user" : "assistant";
-                messagesOnly += "{\"role\":\"" + role + "\",\"content\":\"" + PrecisionEscape(currentContent) + "\"},";
-                currentContent.clear();
-            }
-        };
-
-        while (std::getline(histStream, line)) {
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            if (line.rfind("User: ", 0) == 0) {
-                flushTurn(); currentRole = "User"; currentContent = line.substr(6) + "\n";
-            } else if (line.rfind("Nova: ", 0) == 0) {
-                flushTurn(); currentRole = "Nova"; currentContent = line.substr(6) + "\n";
-            } else if (!currentRole.empty()) {
-                currentContent += line + "\n";
-            }
+        // Anthropic: first message must be "user"
+        if (proto == ProtocolType::Anthropic && !merged.empty() && merged.front().role != "user") {
+            merged.insert(merged.begin(), { "user", "[conversation history]" });
         }
-        flushTurn();
+        turns = std::move(merged);
     }
-    messagesOnly += "{\"role\":\"user\",\"content\":\"" + PrecisionEscape(userPrompt) + "\"}]";
 
-    char tempBuf[32]; sprintf_s(tempBuf, "%.2f", g_config.temperature);
-    std::string pay = "{\"model\":\"" + PrecisionEscape(g_config.model) + "\"";
-    pay += ",\"max_tokens\":" + std::to_string(g_config.maxTokens);
-    pay += ",\"temperature\":" + std::string(tempBuf);
-    pay += ",\"system\":\"" + PrecisionEscape(systemPrompt) + "\"";
-    pay += ",\"messages\":" + messagesOnly + "}";
-    return pay;
-}
-
-// Adapter: Gemini generateContent payload
-static std::string BuildGeminiPayload(const std::string& systemPrompt, const std::string& snapshot,
-                                       const std::string& userPrompt) {
-    std::string contents = "[";
-    // System instruction as first user turn (Gemini uses systemInstruction field)
-    // Build history as alternating user/model turns
-    if (!snapshot.empty()) {
-        std::istringstream histStream(snapshot);
-        std::string line;
-        std::string currentRole, currentContent;
-
-        auto flushTurn = [&]() {
-            if (!currentContent.empty()) {
-                if (!currentContent.empty() && currentContent.back() == '\n') currentContent.pop_back();
-                std::string role = (currentRole == "User") ? "user" : "model";
-                contents += "{\"role\":\"" + role + "\",\"parts\":[{\"text\":\"" + PrecisionEscape(currentContent) + "\"}]},";
-                currentContent.clear();
-            }
-        };
-
-        while (std::getline(histStream, line)) {
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            if (line.rfind("User: ", 0) == 0) {
-                flushTurn(); currentRole = "User"; currentContent = line.substr(6) + "\n";
-            } else if (line.rfind("Nova: ", 0) == 0) {
-                flushTurn(); currentRole = "Nova"; currentContent = line.substr(6) + "\n";
-            } else if (!currentRole.empty()) {
-                currentContent += line + "\n";
-            }
+    // Build JSON array
+    std::string arr;
+    if (proto == ProtocolType::Gemini) {
+        // Gemini uses "contents" with "role" = "user"/"model"
+        arr = "[";
+        for (size_t i = 0; i < turns.size(); i++) {
+            std::string gRole = (turns[i].role == "assistant") ? "model" : "user";
+            if (i > 0) arr += ",";
+            arr += "{\"role\":\"" + gRole + "\",\"parts\":[{\"text\":\"" + PrecisionEscape(turns[i].content) + "\"}]}";
         }
-        flushTurn();
-    }
-    contents += "{\"role\":\"user\",\"parts\":[{\"text\":\"" + PrecisionEscape(userPrompt) + "\"}]}]";
-
-    char tempBuf[32]; sprintf_s(tempBuf, "%.2f", g_config.temperature);
-    std::string pay = "{\"contents\":" + contents;
-    pay += ",\"systemInstruction\":{\"parts\":[{\"text\":\"" + PrecisionEscape(systemPrompt) + "\"}]}";
-    pay += ",\"generationConfig\":{\"maxOutputTokens\":" + std::to_string(g_config.maxTokens);
-    pay += ",\"temperature\":" + std::string(tempBuf) + "}}";
-    return pay;
-}
-
-// Adapter: llama-server legacy /completion (raw prompt with Llama-3 chat template)
-static std::string BuildLlamaLegacyPayload(const std::string& systemPrompt, const std::string& snapshot,
-                                            const std::string& userPrompt) {
-    // Format history into Llama-3 chat template turns
-    std::string formattedHistory;
-    if (!snapshot.empty()) {
-        std::istringstream histStream(snapshot);
-        std::string line;
-        std::string currentRole, currentContent;
-
-        auto appendTurn = [&]() {
-            if (!currentContent.empty()) {
-                if (!currentContent.empty() && currentContent.back() == '\n') currentContent.pop_back();
-                std::string roleId = (currentRole == "User") ? "user" : "assistant";
-                formattedHistory += "<|start_header_id|>" + roleId + "<|end_header_id|>\n\n" + currentContent + "<|eot_id|>";
-                currentContent.clear();
-            }
-        };
-
-        while (std::getline(histStream, line)) {
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            if (line.rfind("User: ", 0) == 0) {
-                appendTurn(); currentRole = "User"; currentContent = line.substr(6) + "\n";
-            } else if (line.rfind("Nova: ", 0) == 0) {
-                appendTurn(); currentRole = "Nova"; currentContent = line.substr(6) + "\n";
-            } else if (!currentRole.empty()) {
-                currentContent += line + "\n";
-            }
+        arr += "]";
+    } else {
+        // OpenAI / Anthropic format
+        arr = "[";
+        for (size_t i = 0; i < turns.size(); i++) {
+            if (i > 0) arr += ",";
+            arr += "{\"role\":\"" + turns[i].role + "\",\"content\":\"" + PrecisionEscape(turns[i].content) + "\"}";
         }
-        appendTurn();
+        arr += "]";
     }
-
-    // Few-shot examples
-    std::string fewShot =
-        "<|start_header_id|>user<|end_header_id|>\n\n"
-        "create a new folder on the desktop<|eot_id|>"
-        "<|start_header_id|>assistant<|end_header_id|>\n\n"
-        "EXEC: mkdir C:\\Users\\MARVIN\\Desktop\\NewNovaFolder<|eot_id|>"
-        "<|start_header_id|>user<|end_header_id|>\n\n"
-        "I attached a log file, can you check it for errors?<|eot_id|>"
-        "<|start_header_id|>assistant<|end_header_id|>\n\n"
-        "I can see the attached file in my context. Here is what I found:<|eot_id|>"
-        "<|start_header_id|>user<|end_header_id|>\n\n"
-        "write a C++ hello world and compile it<|eot_id|>"
-        "<|start_header_id|>assistant<|end_header_id|>\n\n"
-        "EXEC: powershell -Command \"Set-Content -Path 'C:\\Users\\MARVIN\\Nova\\hello.cpp' "
-        "-Value '#include <windows.h>`nint WINAPI WinMain(HINSTANCE h,HINSTANCE,LPSTR,int){"
-        "`nMessageBoxW(0,L`\"Hello from Nova`\",L`\"Nova`\",MB_OK);`nreturn 0;}'\""
-        "\n"
-        "EXEC: cd C:\\Users\\MARVIN\\Nova && cl /O2 /EHsc /std:c++17 /Fe:hello.exe hello.cpp user32.lib<|eot_id|>"
-        "<|start_header_id|>user<|end_header_id|>\n\n"
-        "thanks!<|eot_id|>"
-        "<|start_header_id|>assistant<|end_header_id|>\n\n"
-        "You're welcome. Ready for the next task.<|eot_id|>";
-
-    std::string fullPrompt = "<|begin_of_text|>"
-                             "<|start_header_id|>system<|end_header_id|>\n\n"
-                             + systemPrompt + "<|eot_id|>"
-                             + fewShot + formattedHistory
-                             + "<|start_header_id|>user<|end_header_id|>\n\n"
-                             + userPrompt + "<|eot_id|>"
-                             + "<|start_header_id|>assistant<|end_header_id|>\n\n";
-
-    char tempBuf[32]; sprintf_s(tempBuf, "%.2f", g_config.temperature);
-    std::string pay = "{\"prompt\":\"" + PrecisionEscape(fullPrompt) + "\", "
-                      "\"n_predict\": " + std::to_string(g_config.maxTokens) + ", "
-                      "\"temperature\": " + std::string(tempBuf) + ", "
-                      "\"stream\":false, \"special\": true, "
-                      "\"stop\": [\"<|eot_id|>\", \"User:\", \"Nova:\"]}";
-    return pay;
+    return arr;
 }
 
-// Extract response text from different API response formats
-static std::string ExtractResponse(const std::string& raw, Protocol proto) {
+// Build the full HTTP request body for the configured provider
+static std::string BuildRequestBody(const std::string& sysPrompt, const std::string& snapshot,
+                                     const std::string& userPrompt, ProtocolType proto)
+{
     switch (proto) {
-    case Protocol::LlamaLegacy:
-        return DecodeJsonString(raw, "content");
+    case ProtocolType::LlamaLegacy: {
+        // llama-server /completion with Llama-3 chat template
+        std::string formattedHistory;
+        {
+            std::istringstream hs(snapshot);
+            std::string line, curRole, curContent;
+            auto flush = [&]() {
+                if (!curContent.empty()) {
+                    if (curContent.back() == '\n') curContent.pop_back();
+                    std::string rid = (curRole == "user") ? "user" : "assistant";
+                    formattedHistory += "<|start_header_id|>" + rid + "<|end_header_id|>\n\n" + curContent + "<|eot_id|>";
+                    curContent.clear();
+                }
+            };
+            while (std::getline(hs, line)) {
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                if (line.rfind("User: ", 0) == 0)       { flush(); curRole = "user"; curContent = line.substr(6) + "\n"; }
+                else if (line.rfind("Nova: ", 0) == 0)   { flush(); curRole = "assistant"; curContent = line.substr(6) + "\n"; }
+                else if (line.rfind("[System]: ", 0) == 0) { flush(); curRole = "user"; curContent = "[Command Output] " + line.substr(10) + "\n"; }
+                else if (!curRole.empty()) curContent += line + "\n";
+            }
+            flush();
+        }
 
-    case Protocol::OpenAICompat: {
-        // Navigate: choices[0].message.content
-        size_t contentPos = raw.find("\"content\"");
-        if (contentPos == std::string::npos) return "";
-        // Find the content value — skip past the choices/message nesting
-        // Look for "content":"..." after "message"
+        std::string fewShot =
+            "<|start_header_id|>user<|end_header_id|>\n\ncreate a new folder on the desktop<|eot_id|>"
+            "<|start_header_id|>assistant<|end_header_id|>\n\nEXEC: mkdir C:\\Users\\Public\\Desktop\\NewNovaFolder<|eot_id|>"
+            "<|start_header_id|>user<|end_header_id|>\n\nthanks!<|eot_id|>"
+            "<|start_header_id|>assistant<|end_header_id|>\n\nYou're welcome. Ready for the next task.<|eot_id|>";
+
+        std::string fullPrompt = "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n"
+                               + sysPrompt + "<|eot_id|>"
+                               + fewShot + formattedHistory
+                               + "<|start_header_id|>user<|end_header_id|>\n\n"
+                               + userPrompt + "<|eot_id|>"
+                               + "<|start_header_id|>assistant<|end_header_id|>\n\n";
+
+        return "{\"prompt\":\"" + PrecisionEscape(fullPrompt) + "\","
+               "\"n_predict\":" + std::to_string(g_config.maxTokens) + ","
+               "\"temperature\":" + std::to_string(g_config.temperature) + ","
+               "\"stream\":false,\"special\":true,"
+               "\"stop\":[\"<|eot_id|>\",\"User:\",\"Nova:\"]}";
+    }
+
+    case ProtocolType::OpenAICompat: {
+        std::string messages = BuildChatMessages(snapshot, userPrompt, proto);
+        // Insert system message at front
+        std::string sysMsg = "{\"role\":\"system\",\"content\":\"" + PrecisionEscape(sysPrompt) + "\"}";
+        // Replace leading [ with [sysMsg,
+        if (messages.size() > 1) messages = "[" + sysMsg + "," + messages.substr(1);
+        else messages = "[" + sysMsg + "]";
+
+        return "{\"model\":\"" + PrecisionEscape(g_config.model) + "\","
+               "\"messages\":" + messages + ","
+               "\"temperature\":" + std::to_string(g_config.temperature) + ","
+               "\"max_tokens\":" + std::to_string(g_config.maxTokens) + ","
+               "\"stream\":false}";
+    }
+
+    case ProtocolType::Anthropic: {
+        std::string messages = BuildChatMessages(snapshot, userPrompt, proto);
+        return "{\"model\":\"" + PrecisionEscape(g_config.model) + "\","
+               "\"system\":\"" + PrecisionEscape(sysPrompt) + "\","
+               "\"messages\":" + messages + ","
+               "\"max_tokens\":" + std::to_string(g_config.maxTokens) + ","
+               "\"temperature\":" + std::to_string(g_config.temperature) + ","
+               "\"stream\":false}";
+    }
+
+    case ProtocolType::Gemini: {
+        std::string contents = BuildChatMessages(snapshot, userPrompt, proto);
+        return "{\"contents\":" + contents + ","
+               "\"systemInstruction\":{\"parts\":[{\"text\":\"" + PrecisionEscape(sysPrompt) + "\"}]},"
+               "\"generationConfig\":{\"temperature\":" + std::to_string(g_config.temperature) + ","
+               "\"maxOutputTokens\":" + std::to_string(g_config.maxTokens) + "}}";
+    }
+    }
+    return "{}";
+}
+
+// Extract the assistant's reply text from the provider's JSON response
+static std::string ExtractReply(const std::string& raw, ProtocolType proto) {
+    switch (proto) {
+    case ProtocolType::LlamaLegacy:
+        return DecodeJsonString(raw, "content");
+    case ProtocolType::OpenAICompat: {
         size_t msgPos = raw.find("\"message\"");
         if (msgPos != std::string::npos) {
-            size_t cp = raw.find("\"content\"", msgPos);
-            if (cp != std::string::npos) return DecodeJsonString(raw.substr(cp - 1), "content");
+            std::string sub = raw.substr(msgPos);
+            return DecodeJsonString(sub, "content");
         }
         return DecodeJsonString(raw, "content");
     }
-
-    case Protocol::Anthropic: {
-        // Anthropic: content[0].text
-        size_t textPos = raw.find("\"text\"");
-        if (textPos != std::string::npos) {
-            // Find the text field inside the content array
-            return DecodeJsonString(raw.substr(textPos - 1), "text");
+    case ProtocolType::Anthropic: {
+        size_t cPos = raw.find("\"content\"");
+        if (cPos != std::string::npos) {
+            std::string sub = raw.substr(cPos);
+            size_t tPos = sub.find("\"text\"");
+            if (tPos != std::string::npos) {
+                size_t second = sub.find("\"text\"", tPos + 6);
+                if (second != std::string::npos) {
+                    std::string sub2 = sub.substr(second);
+                    return DecodeJsonString("{" + sub2 + "}", "text");
+                }
+            }
+            return DecodeJsonString(sub, "text");
         }
         return "";
     }
-
-    case Protocol::Gemini: {
-        // Gemini: candidates[0].content.parts[0].text
-        size_t textPos = raw.find("\"text\"");
-        if (textPos != std::string::npos) {
-            return DecodeJsonString(raw.substr(textPos - 1), "text");
-        }
-        return "";
-    }
+    case ProtocolType::Gemini:
+        return DecodeJsonString(raw, "text");
     }
     return "";
 }
 
-// ────────────────────────────────────────────────────────────────
-// AI THREAD — unified multi-provider
-// ────────────────────────────────────────────────────────────────
-void AIThreadFunc(std::wstring userMsg, std::string webInfo, bool hasAttach, Attachment attach) {
-    DevLog("[AI] Thread started (provider=%d protocol=%d)\n", g_config.provider, (int)g_providerPresets[g_config.provider].protocol);
-
-    std::string personality = LoadPersonality();
-    std::string systemPrompt = BuildSystemPrompt(personality, webInfo);
-
-    std::string snapshot;
-    {
-        std::lock_guard<std::mutex> lk(historyMutex);
-        snapshot = WStringToString(conversationHistory);
-    }
-
-    std::string userPrompt = WStringToString(userMsg);
-    if (hasAttach) {
-        userPrompt += "\n\nAttached file content: " + attach.textContent;
-    }
-
-    // Determine protocol from provider preset
-    Protocol proto = g_providerPresets[g_config.provider].protocol;
-
-    // Build payload per protocol
-    std::string pay;
-    switch (proto) {
-    case Protocol::LlamaLegacy:  pay = BuildLlamaLegacyPayload(systemPrompt, snapshot, userPrompt); break;
-    case Protocol::OpenAICompat: pay = BuildOpenAIPayload(systemPrompt, snapshot, userPrompt);       break;
-    case Protocol::Anthropic:    pay = BuildAnthropicPayload(systemPrompt, snapshot, userPrompt);     break;
-    case Protocol::Gemini:       pay = BuildGeminiPayload(systemPrompt, snapshot, userPrompt);        break;
-    }
-
-    DevLog("[AI] Payload: %zu bytes\n", pay.size());
-
-    // Determine endpoint path
-    std::string endpoint = g_config.endpointPath;
-    if (proto == Protocol::Gemini && !g_config.model.empty()) {
-        // Gemini endpoint: /v1beta/models/{model}:generateContent?key={apiKey}
-        endpoint = "/v1beta/models/" + g_config.model + ":generateContent";
-        if (!g_config.apiKey.empty()) endpoint += "?key=" + g_config.apiKey;
-    }
-
-    // Build HTTP headers
-    std::string headers = "Content-Type: application/json\r\n";
-    if (proto == Protocol::Anthropic) {
-        headers += "x-api-key: " + g_config.apiKey + "\r\n";
-        headers += "anthropic-version: 2023-06-01\r\n";
-    } else if (proto == Protocol::OpenAICompat && !g_config.apiKey.empty()) {
-        headers += "Authorization: Bearer " + g_config.apiKey + "\r\n";
-    }
-
-    // Connect
-    std::wstring hostW = StringToWString(g_config.host);
+// Send request to the configured provider and return reply
+static std::string SendToProvider(const std::string& body) {
+    std::wstring host = StringToWString(g_config.host);
     INTERNET_PORT port = (INTERNET_PORT)g_config.port;
+    ProtocolType proto = g_providerPresets[g_config.provider].protocol;
+
+    // Build endpoint — Gemini needs model name and API key in URL
+    std::string ep = g_config.endpointPath;
+    if (proto == ProtocolType::Gemini) {
+        ep = "/v1beta/models/" + g_config.model + ":generateContent?key=" + g_config.apiKey;
+    }
+    std::wstring endpoint = StringToWString(ep);
+
     DWORD flags = INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE;
-    if (g_config.useSSL) flags |= INTERNET_FLAG_SECURE;
+    if (g_config.useSSL) flags |= INTERNET_FLAG_SECURE | INTERNET_FLAG_IGNORE_CERT_CN_INVALID | INTERNET_FLAG_IGNORE_CERT_DATE_INVALID;
 
-    bool ok = false;
-    std::wstring reply;
-
-    HINTERNET hS = InternetOpenW(L"NovaAI", 1, 0, 0, 0);
-    if (!hS) { PostMessageW(hMainWnd, WM_AI_DONE, 0, 0); return; }
+    HINTERNET hS = InternetOpenW(L"NovaAI/2.0", 1, 0, 0, 0);
+    if (!hS) { DevLog("[Provider] ERROR: InternetOpen failed\n"); return ""; }
 
     DWORD toConn = 15000, toRecv = 180000;
     InternetSetOptionW(hS, INTERNET_OPTION_CONNECT_TIMEOUT, &toConn, sizeof(toConn));
     InternetSetOptionW(hS, INTERNET_OPTION_RECEIVE_TIMEOUT, &toRecv, sizeof(toRecv));
     InternetSetOptionW(hS, INTERNET_OPTION_SEND_TIMEOUT,    &toRecv, sizeof(toRecv));
 
-    HINTERNET hC = InternetConnectW(hS, hostW.c_str(), port, 0, 0, INTERNET_SERVICE_HTTP, 0, 0);
-    if (hC) {
-        std::wstring endpointW = StringToWString(endpoint);
-        HINTERNET hR = HttpOpenRequestW(hC, L"POST", endpointW.c_str(), 0, 0, 0, flags, 0);
-        if (hR) {
-            // For HTTPS: ignore cert errors for self-signed local certs
-            if (g_config.useSSL) {
-                DWORD secFlags = 0;
-                DWORD secSize = sizeof(secFlags);
-                InternetQueryOptionW(hR, INTERNET_OPTION_SECURITY_FLAGS, &secFlags, &secSize);
-                secFlags |= SECURITY_FLAG_IGNORE_UNKNOWN_CA | SECURITY_FLAG_IGNORE_CERT_CN_INVALID;
-                InternetSetOptionW(hR, INTERNET_OPTION_SECURITY_FLAGS, &secFlags, sizeof(secFlags));
-            }
-
-            if (HttpSendRequestA(hR, headers.c_str(), (DWORD)headers.size(), (void*)pay.c_str(), (DWORD)pay.size())) {
-                std::string full; char b[8192]; DWORD r;
-                while (InternetReadFile(hR, b, 8192, &r) && r > 0) full.append(b, r);
-                
-                DevLog("[AI] Response: %zu bytes\n", full.size());
-
-                std::string clean = ExtractResponse(full, proto);
-                if (!clean.empty()) {
-                    reply = StringToWString(clean);
-                    std::lock_guard<std::mutex> lk(historyMutex);
-                    conversationHistory += L"Nova: " + reply + L"\r\n";
-                    TrimHistory(); SaveHistory(); SpeakAsync(reply);
-                    ok = true;
-                } else {
-                    DevLog("[AI] ERROR: Could not extract response. Raw: %.200s\n", full.c_str());
-                }
-            } else {
-                DevLog("[AI] ERROR: HttpSendRequest failed GLE=%lu\n", GetLastError());
-            }
-            InternetCloseHandle(hR);
-        }
-        InternetCloseHandle(hC);
-    } else {
-        DevLog("[AI] ERROR: Could not connect to %s:%d\n", g_config.host.c_str(), g_config.port);
+    HINTERNET hC = InternetConnectW(hS, host.c_str(), port, 0, 0, 3, 0, 0);
+    if (!hC) {
+        DevLog("[Provider] ERROR: Cannot connect to %s:%d GLE=%lu\n", g_config.host.c_str(), port, GetLastError());
+        InternetCloseHandle(hS); return "";
     }
-    InternetCloseHandle(hS);
 
+    HINTERNET hR = HttpOpenRequestW(hC, L"POST", endpoint.c_str(), 0, 0, 0, flags, 0);
+    std::string result;
+
+    if (hR) {
+        // Build headers based on provider
+        std::string headers = "Content-Type: application/json\r\n";
+        if (!g_config.apiKey.empty() && proto != ProtocolType::Gemini) { // Gemini uses URL key
+            if (proto == ProtocolType::Anthropic) {
+                headers += "x-api-key: " + g_config.apiKey + "\r\n";
+                headers += "anthropic-version: 2023-06-01\r\n";
+            } else {
+                headers += "Authorization: Bearer " + g_config.apiKey + "\r\n";
+            }
+        }
+
+        DevLog("[Provider] Sending %zu bytes to %s:%d%s\n", body.size(), g_config.host.c_str(), port, ep.c_str());
+
+        if (HttpSendRequestA(hR, headers.c_str(), (DWORD)headers.size(), (void*)body.c_str(), (DWORD)body.size())) {
+            // Log HTTP status code for debugging
+            DWORD statusCode = 0, szStatus = sizeof(statusCode);
+            HttpQueryInfoA(hR, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER, &statusCode, &szStatus, nullptr);
+            
+            char buf[8192]; DWORD r;
+            while (InternetReadFile(hR, buf, 8192, &r) && r > 0) {
+                // THE HARDWARE KILL-SWITCH CHECK
+                if (AppStateManager::Instance().abortInference.load()) {
+                    DevLog("[Network] Abort signal detected. Severing socket.\n");
+                    break; 
+                }
+                result.append(buf, r);
+            }
+            // Add a visual indicator to the response if aborted
+            if (AppStateManager::Instance().abortInference.load()) {
+                result += "\n\n[System: Generation aborted by user.]";
+            }
+            
+            DevLog("[Provider] HTTP %lu — %zu bytes received\n", statusCode, result.size());
+        }
+        InternetCloseHandle(hR);
+    }
+    InternetCloseHandle(hC);
+    InternetCloseHandle(hS);
+    return result;
+}
+
+// ════════════════════════════════════════════════════════════════
+// AI THREAD (Unified — works with all 17 providers)
+// ════════════════════════════════════════════════════════════════
+void AIThreadFunc(std::wstring userMsg, std::string webInfo, bool hasAttach, Attachment attach) {
+    DevLog("[AI] Thread started — provider: %S\n", g_providerPresets[AppStateManager::Instance().config.provider].displayName);
+
+    // 1. Dynamically get paths for Universal Release
+    char* userProfilePath = nullptr;
+    size_t len = 0;
+    _dupenv_s(&userProfilePath, &len, "USERPROFILE");
+    std::string uniProfile = userProfilePath ? userProfilePath : "C:\\";
+    if (userProfilePath) free(userProfilePath);
+
+    // Get the desktop using your existing GetDesktopDir() helper
+    std::string uniDesktop = GetDesktopDir(); 
+    if (uniDesktop.back() == '\\') uniDesktop.pop_back(); // Remove trailing slash for consistency
+
+    // 2. Build the System Prompt
+    std::string sys = LoadPersonality();
+    sys += "\n\n=== SYSTEM PROTOCOL ===\n";
+    sys += "1. You are Nova, a local Windows automation agent.\n";
+    sys += "2. ENVIRONMENT: Profile=" + uniProfile + ", Desktop=" + uniDesktop + "\n";
+    sys += "3. FILE WRITING: Never use 'echo'. Always use this exact format:\n";
+    sys += "   EXEC: powershell -Command \"Set-Content -Path '" + uniDesktop + "\\app.cpp' -Value 'code_here'\"\n";
+    sys += "4. Use '`n' for new lines and '\\\"' for quotes inside the code.\n";
+    sys += "5. COMPILATION: Always cd to the desktop first. Format:\n";
+    sys += "   EXEC: cmd /c \"cd /d " + uniDesktop + " && cl /nologo /O2 /EHsc /std:c++17 /Fe:app.exe app.cpp\"\n";
+    sys += "6. If user provides code or asks for an application, GENERATE THE FULL SOURCE and save via EXEC: using powershell Set-Content.\n";
+    
+    // --- ADD THESE 3 LINES ---
+    sys += "7. ATOMIC PROTOCOL: You may only issue ONE EXEC: command per message.\n";
+    sys += "8. WAIT FOR FEEDBACK: After issuing an EXEC: command, YOU MUST STOP GENERATING TEXT.\n";
+    sys += "9. SELF-CORRECTION: I will reply with [SYSTEM FEEDBACK] showing the hardware output. If you see a compiler error, analyze it, rewrite the code using Set-Content, and re-compile autonomously.\n";
+sys += "10. ANTI-HALLUCINATION: NEVER generate or type the words '[SYSTEM FEEDBACK]'. That is injected by the hardware. You must output your EXEC: command and then IMMEDIATELY STOP generating text so the hardware can respond.\n";
+    // -------------------------
+
+    sys += "\n=== CAPABILITIES ===\n";
+    sys += "- ATTACH: File content analysis.\n";
+    sys += "- SPEECH: Responses read via SAPI TTS.\n";
+    sys += "- INTERNET: Weather, news, and Wikipedia are fetched automatically.\n";
+    
+    sys += "\n=== CONSTRAINTS ===\n";
+    sys += "Always use absolute paths starting with " + uniProfile + "\\\n";
+    sys += "Be direct. Do not add disclaimers or apologies.\n";
+
+    if (!webInfo.empty()) sys += "\n\nContext:\n" + webInfo;
+
+    // 3. Prepare the request
+    std::string userPrompt = WStringToString(userMsg);
+    if (hasAttach) userPrompt += "\n\nAttached file content:\n" + attach.textContent;
+
+    std::string snapshot;
+    { 
+        std::lock_guard<std::mutex> lk(historyMutex); 
+        snapshot = WStringToString(conversationHistory); 
+    }
+
+    ProtocolType proto = g_providerPresets[AppStateManager::Instance().config.provider].protocol;
+    std::string body = BuildRequestBody(sys, snapshot, userPrompt, proto);
+
+    // 4. Send and Process
+    std::string rawResponse = SendToProvider(body);
+    std::string clean = ExtractReply(rawResponse, proto);
+
+    bool ok = !clean.empty();
+    std::wstring reply;
+    if (ok) {
+        reply = StringToWString(clean);
+        {
+            std::lock_guard<std::mutex> lk(historyMutex);
+            conversationHistory += L"Nova: " + reply + L"\r\n";
+        }
+        TrimHistory();
+        SaveHistory();
+        SpeakAsync(reply);
+    } else {
+        DevLog("[AI] ERROR: Empty reply from provider.\n");
+    }
+
+    // 5. Update UI (Message the main window that we are done)
     WCHAR* heapStr = ok ? new WCHAR[reply.size() + 1] : nullptr;
     if (heapStr) wcscpy_s(heapStr, reply.size() + 1, reply.c_str());
     PostMessageW(hMainWnd, WM_AI_DONE, (WPARAM)ok, (LPARAM)heapStr);
+
+    // 6. Personality evolution
+    if (ok) {
+        std::string cleanReply = clean;
+        std::string currentP = LoadPersonality();
+    //  std::thread([currentP, cleanReply]() { EvolvePersonality(currentP, cleanReply); }).detach();
+    }
 }
 
-// ────────────────────────────────────────────────────────────────
-// CHAT THREAD
-// ────────────────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════
+// CHAT THREAD (Background processor)
+// ════════════════════════════════════════════════════════════════
 DWORD WINAPI ChatThreadProc(LPVOID p) {
     ChatRequest* r = (ChatRequest*)p;
-    std::wstring txt        = r->userText;
-    bool         hasAttach  = r->hasAttachment;
-    Attachment   attach     = r->attachment;
+    std::wstring txt = r->userText;
+    bool hasAttach = r->hasAttachment;
+    Attachment attach = r->attachment;
     delete r;
+
     std::string orig = WStringToString(txt);
-    std::string low  = orig;
-    std::transform(low.begin(), low.end(), low.begin(), [](unsigned char c) { 
-        return (char)::tolower(c); 
-    });
-    DevLog("[Chat] User input: %.120s\n", orig.c_str());
+    std::string low = orig;
+    std::transform(low.begin(), low.end(), low.begin(), [](unsigned char c) { return (char)::tolower(c); });
+    DevLog("[Chat] User: %.120s\n", orig.c_str());
+
     std::string info = AnalyzeAndFetch(low, orig);
-    if (!info.empty()) DevLog("[Chat] Web context injected: %zu chars\n", info.size());
     AIThreadFunc(txt, info, hasAttach, attach);
     return 0;
 }
 
+// ════════════════════════════════════════════════════════════════
+// UI CHAT SUBMISSION
+// ════════════════════════════════════════════════════════════════
 void ProcessChat() {
-    if (aiRunning) { DevLog("[Chat] Blocked — AI already running\n"); return; }
+    if (AppStateManager::Instance().aiRunning.load()) return;
+
     int len = GetWindowTextLengthW(hEditInput);
     if (len <= 0) return;
+
     std::wstring txt(len + 1, L'\0');
     GetWindowTextW(hEditInput, txt.data(), len + 1);
     txt.resize(len);
-    { std::lock_guard<std::mutex> lk(historyMutex); conversationHistory += L"User: " + txt + L"\r\n"; }
+
+    {
+        std::lock_guard<std::mutex> lk(historyMutex);
+        conversationHistory += L"User: " + txt + L"\r\n";
+    }
+
     AppendRichText(hEditDisplay, L"You: ", true);
     AppendRichText(hEditDisplay, txt + L"\r\n", false);
 
     if (g_hasAttachment) {
-        AppendRichText(hEditDisplay, L"\U0001F4CE  " + g_attachment.displayName + L"\r\n", false, RGB(100, 100, 180));
+        AppendRichText(hEditDisplay, L"\U0001F4CE  " + g_attachment.displayName + L"\r\n", false);
     }
 
     SetWindowTextW(hEditInput, L"");
+    AppStateManager::Instance().abortInference.store(false); // Reset kill switch
+    
+    // Toggle UI buttons
     EnableWindow(hButtonSend, FALSE);
-    aiRunning = true;
+    EnableWindow(hButtonStop, TRUE);
+    
+    AppStateManager::Instance().aiRunning.store(true);
     SetAppState(AppState::Busy);
-    DevLog("[Chat] Dispatching AI thread\n");
 
-    ChatRequest* req    = new ChatRequest;
-    req->userText       = txt;
-    req->hasAttachment  = g_hasAttachment;
-    req->attachment     = g_attachment;
+    ChatRequest* req = new ChatRequest;
+    req->userText      = txt;
+    req->hasAttachment = g_hasAttachment;
+    req->attachment    = g_attachment;
     ClearAttachment();
 
     HANDLE hThread = CreateThread(0, 0, ChatThreadProc, req, 0, 0);
     if (!hThread) {
-        DevLog("[Chat] ERROR: CreateThread failed GLE=%lu\n", GetLastError());
-        delete req; aiRunning = false;
+        delete req;
+        AppStateManager::Instance().aiRunning.store(false);
         EnableWindow(hButtonSend, TRUE);
+        EnableWindow(hButtonStop, FALSE);
         SetAppState(AppState::Offline);
-    } else { CloseHandle(hThread); }
+    } else {
+        CloseHandle(hThread);
+    }
 }
 
-// ────────────────────────────────────────────────────────────────
-// INDICATOR
-// ────────────────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════
+// STATUS INDICATOR (Animated)
+// ════════════════════════════════════════════════════════════════
 LRESULT CALLBACK IndicatorWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
-    case WM_CREATE:
-        SetTimer(hwnd, IDT_PULSE, 40, nullptr);
-        return 0;
-
+    case WM_CREATE: SetTimer(hwnd, IDT_PULSE, 40, nullptr); return 0;
     case WM_TIMER:
-        g_pulseT += (g_appState == AppState::Busy) ? 0.18f : 0.08f;
+        g_pulseT += (g_appState.load() == AppState::Busy) ? 0.18f : 0.08f;
         if (g_pulseT > (float)(2.0 * M_PI)) g_pulseT -= (float)(2.0 * M_PI);
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
@@ -1858,19 +1801,15 @@ LRESULT CALLBACK IndicatorWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             gfx.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
 
             float pulse = sinf(g_pulseT) * 0.5f + 0.5f;
-            BYTE rC = 40, gC = 200, bC = 80; 
+            BYTE rC = 40, gC = 200, bC = 80;
             std::wstring statusText = L"Online";
+            AppState currentState = g_appState.load();
 
-            if (g_appState == AppState::Busy) { 
-                rC = 230; gC = 140; bC = 20; 
-                statusText = L"Thinking...";
-            } else if (g_appState == AppState::Offline) { 
-                rC = 210; gC = 50; bC = 50; 
-                statusText = L"Offline";
-            }
+            if (currentState == AppState::Busy)    { rC = 230; gC = 140; bC = 20; statusText = L"Thinking..."; }
+            else if (currentState == AppState::Offline) { rC = 210; gC = 50; bC = 50; statusText = L"Offline"; }
 
             const float cx = 13.0f, cy = rc.bottom / 2.0f, baseR = 4.0f;
-            const float pulseR = baseR + pulse * 2.0f, glowR = pulseR + 4.0f;
+            const float pulseR = baseR + pulse * 2.0f, glowR = pulseR + 4.0f; 
 
             Gdiplus::SolidBrush bGlow(Gdiplus::Color((BYTE)(pulse * 50), rC, gC, bC));
             Gdiplus::SolidBrush bPulse(Gdiplus::Color((BYTE)(90 + pulse * 80), rC, gC, bC));
@@ -1891,271 +1830,272 @@ LRESULT CALLBACK IndicatorWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         EndPaint(hwnd, &ps);
         return 0;
     }
-    case WM_DESTROY:
-        KillTimer(hwnd, IDT_PULSE);
-        return 0;
+    case WM_DESTROY: KillTimer(hwnd, IDT_PULSE); return 0;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
-// ────────────────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════
 // SETTINGS DIALOG
-// ────────────────────────────────────────────────────────────────
-static HWND CreateLabel(HWND parent, const wchar_t* text, int x, int y, int w, int h, HINSTANCE hI) {
-    HWND lbl = CreateWindowExW(0, L"STATIC", text, WS_CHILD | WS_VISIBLE | SS_RIGHT, x, y, w, h, parent, 0, hI, 0);
-    SendMessageW(lbl, WM_SETFONT, (WPARAM)hFontSettings, TRUE);
-    return lbl;
+// ════════════════════════════════════════════════════════════════
+static HWND hComboProvider = nullptr;
+static HWND hEditHost = nullptr, hEditPort = nullptr, hEditApiKey = nullptr;
+static HWND hEditModel = nullptr, hEditTemp = nullptr, hEditMaxTok = nullptr;
+static HWND hEditCtx = nullptr, hEditGpu = nullptr, hEditModelPath = nullptr;
+static HWND hCheckAutoStart = nullptr;
+static HWND hLabelStatus = nullptr;
+static HFONT hSettingsFont = nullptr;
+static HFONT hSettingsFontBold = nullptr;
+
+static void PopulateSettingsFromConfig(bool setCombo = true) {
+    if (setCombo) SendMessageW(hComboProvider, CB_SETCURSEL, (WPARAM)g_config.provider, 0);
+    SetWindowTextW(hEditHost,    StringToWString(g_config.host).c_str());
+    SetWindowTextW(hEditPort,    std::to_wstring(g_config.port).c_str());
+    SetWindowTextW(hEditApiKey,  StringToWString(g_config.apiKey).c_str());
+    SetWindowTextW(hEditModel,   StringToWString(g_config.model).c_str());
+
+    wchar_t tempBuf[32]; swprintf_s(tempBuf, L"%.2f", g_config.temperature);
+    SetWindowTextW(hEditTemp, tempBuf);
+    SetWindowTextW(hEditMaxTok,  std::to_wstring(g_config.maxTokens).c_str());
+    SetWindowTextW(hEditCtx,     std::to_wstring(g_config.contextSize).c_str());
+    SetWindowTextW(hEditGpu,     std::to_wstring(g_config.gpuLayers).c_str());
+    SetWindowTextW(hEditModelPath, StringToWString(g_config.modelPath).c_str());
+    SendMessageW(hCheckAutoStart, BM_SETCHECK, g_config.autoStartEngine ? BST_CHECKED : BST_UNCHECKED, 0);
 }
 
-static HWND CreateEdit(HWND parent, int id, const wchar_t* text, int x, int y, int w, int h, HINSTANCE hI, DWORD style = 0) {
-    HWND hw = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", text, WS_CHILD|WS_VISIBLE|ES_AUTOHSCROLL|style, x, y, w, h, parent, (HMENU)(LONG_PTR)id, hI, 0);
-    SendMessageW(hw, WM_SETFONT, (WPARAM)hFontSettings, TRUE);
-    return hw;
+static void OnProviderChanged() {
+    int sel = (int)SendMessageW(hComboProvider, CB_GETCURSEL, 0, 0);
+    if (sel < 0 || sel >= PROV_COUNT) return;
+    const auto& p = g_providerPresets[sel];
+    SetWindowTextW(hEditHost, StringToWString(p.defaultHost).c_str());
+    SetWindowTextW(hEditPort, std::to_wstring(p.defaultPort).c_str());
+    SetWindowTextW(hEditModel, StringToWString(p.defaultModel).c_str());
+    // Don't clear API key — user may have entered it
+    SetWindowTextW(hLabelStatus, L"");
 }
 
 LRESULT CALLBACK SettingsWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
     case WM_CREATE: {
-        HINSTANCE hI = ((LPCREATESTRUCT)l)->hInstance;
-        hFontSettings = CreateFontW(15, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
-        int y = 15, LW = 110, EW = 280, EH = 24, GAP = 32, LX = 15, EX = 130;
+        hSettingsFont = CreateFontW(15, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+        hSettingsFontBold = CreateFontW(15, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+        auto MakeLabel = [&](const wchar_t* text, int y) {
+            HWND lbl = CreateWindowExW(0, L"STATIC", text, WS_CHILD | WS_VISIBLE | SS_RIGHT, 10, y + 3, 105, 20, h, 0, 0, 0);
+            SendMessageW(lbl, WM_SETFONT, (WPARAM)hSettingsFont, TRUE);
+        };
+        auto MakeEdit = [&](int id, int y, int width = 280) -> HWND {
+            HWND e = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 120, y, width, 24, h, (HMENU)(INT_PTR)id, 0, 0);
+            SendMessageW(e, WM_SETFONT, (WPARAM)hSettingsFont, TRUE);
+            return e;
+        };
 
-        // Provider
-        CreateLabel(h, L"Provider:", LX, y+3, LW, 20, hI);
-        hComboProvider = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD|WS_VISIBLE|CBS_DROPDOWNLIST|WS_VSCROLL, EX, y, EW, 300, h, (HMENU)IDC_PROVIDER_COMBO, hI, 0);
-        SendMessageW(hComboProvider, WM_SETFONT, (WPARAM)hFontSettings, TRUE);
-        for (int i = 0; i < PROVIDER_COUNT; i++) SendMessageW(hComboProvider, CB_ADDSTRING, 0, (LPARAM)g_providerPresets[i].displayName);
-        SendMessageW(hComboProvider, CB_SETCURSEL, g_config.provider, 0);
-        y += GAP;
+        int y = 12;
+        // Title
+        HWND hTitle = CreateWindowExW(0, L"STATIC", L"Nova Settings", WS_CHILD | WS_VISIBLE, 10, y, 400, 24, h, 0, 0, 0);
+        SendMessageW(hTitle, WM_SETFONT, (WPARAM)hSettingsFontBold, TRUE); y += 32;
 
-        // Host + Port
-        CreateLabel(h, L"Host:", LX, y+3, LW, 20, hI);
-        hEditHost = CreateEdit(h, IDC_HOST_EDIT, StringToWString(g_config.host).c_str(), EX, y, EW-80, EH, hI);
-        CreateLabel(h, L"Port:", EX+EW-72, y+3, 32, 20, hI);
-        hEditPort = CreateEdit(h, IDC_PORT_EDIT, std::to_wstring(g_config.port).c_str(), EX+EW-38, y, 58, EH, hI, ES_NUMBER);
-        y += GAP;
+        // Provider dropdown
+        MakeLabel(L"Provider:", y);
+        hComboProvider = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+                                         120, y, 280, 400, h, (HMENU)IDC_COMBO_PROV, 0, 0);
+        SendMessageW(hComboProvider, WM_SETFONT, (WPARAM)hSettingsFont, TRUE);
+        for (int i = 0; i < PROV_COUNT; i++)
+            SendMessageW(hComboProvider, CB_ADDSTRING, 0, (LPARAM)g_providerPresets[i].displayName);
+        y += 30;
 
-        // API Key
-        CreateLabel(h, L"API Key:", LX, y+3, LW, 20, hI);
-        hEditApiKey = CreateEdit(h, IDC_APIKEY_EDIT, StringToWString(g_config.apiKey).c_str(), EX, y, EW, EH, hI, ES_PASSWORD);
-        y += GAP;
+        MakeLabel(L"Host:",        y); hEditHost     = MakeEdit(IDC_EDIT_HOST, y);     y += 28;
+        MakeLabel(L"Port:",        y); hEditPort     = MakeEdit(IDC_EDIT_PORT, y, 80); y += 28;
+        MakeLabel(L"API Key:",     y); hEditApiKey   = MakeEdit(IDC_EDIT_APIKEY, y);   y += 28;
+        MakeLabel(L"Model:",       y); hEditModel    = MakeEdit(IDC_EDIT_MODEL, y);    y += 28;
+        MakeLabel(L"Temperature:", y); hEditTemp     = MakeEdit(IDC_EDIT_TEMP, y, 80); y += 28;
+        MakeLabel(L"Max Tokens:",  y); hEditMaxTok   = MakeEdit(IDC_EDIT_MAXTOK, y, 80); y += 28;
+        MakeLabel(L"Context Size:", y); hEditCtx     = MakeEdit(IDC_EDIT_CTX, y, 80);  y += 28;
+        MakeLabel(L"GPU Layers:",  y); hEditGpu      = MakeEdit(IDC_EDIT_GPU, y, 80);  y += 28;
+        MakeLabel(L"Model Path:",  y); hEditModelPath = MakeEdit(IDC_EDIT_MODPATH, y); y += 28;
 
-        // Model
-        CreateLabel(h, L"Model:", LX, y+3, LW, 20, hI);
-        hEditModel = CreateEdit(h, IDC_MODEL_EDIT, StringToWString(g_config.model).c_str(), EX, y, EW, EH, hI);
-        y += GAP;
+        // Auto-start checkbox
+        hCheckAutoStart = CreateWindowExW(0, L"BUTTON", L"Auto-start local engine",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 120, y, 280, 22, h, (HMENU)IDC_CHECK_AUTO, 0, 0);
+        SendMessageW(hCheckAutoStart, WM_SETFONT, (WPARAM)hSettingsFont, TRUE);
+        y += 32;
 
-        // Endpoint
-        CreateLabel(h, L"Endpoint:", LX, y+3, LW, 20, hI);
-        hEditEndpoint = CreateEdit(h, IDC_ENDPOINT_EDIT, StringToWString(g_config.endpointPath).c_str(), EX, y, EW, EH, hI);
-        y += GAP;
-
-        // SSL + Temperature + Max Tokens row
-        hCheckSSL = CreateWindowExW(0, L"BUTTON", L"Use SSL/HTTPS", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, EX, y, 130, 20, h, (HMENU)IDC_SSL_CHECK, hI, 0);
-        SendMessageW(hCheckSSL, WM_SETFONT, (WPARAM)hFontSettings, TRUE);
-        SendMessageW(hCheckSSL, BM_SETCHECK, g_config.useSSL ? BST_CHECKED : BST_UNCHECKED, 0);
-        y += GAP;
-
-        // Temperature
-        CreateLabel(h, L"Temperature:", LX, y+3, LW, 20, hI);
-        char tempStr[16]; sprintf_s(tempStr, "%.2f", g_config.temperature);
-        hEditTemp = CreateEdit(h, IDC_TEMP_EDIT, StringToWString(tempStr).c_str(), EX, y, 70, EH, hI);
-        // Max Tokens
-        CreateLabel(h, L"Max Tokens:", EX+80, y+3, 80, 20, hI);
-        hEditMaxTok = CreateEdit(h, IDC_MAXTOK_EDIT, std::to_wstring(g_config.maxTokens).c_str(), EX+165, y, 70, EH, hI, ES_NUMBER);
-        y += GAP;
-
-        // Context Size + GPU Layers
-        CreateLabel(h, L"Context Size:", LX, y+3, LW, 20, hI);
-        hEditCtxSize = CreateEdit(h, IDC_CTXSIZE_EDIT, std::to_wstring(g_config.contextSize).c_str(), EX, y, 70, EH, hI, ES_NUMBER);
-        CreateLabel(h, L"GPU Layers:", EX+80, y+3, 80, 20, hI);
-        hEditGpuLayers = CreateEdit(h, IDC_GPULAYERS_EDIT, std::to_wstring(g_config.gpuLayers).c_str(), EX+165, y, 70, EH, hI, ES_NUMBER);
-        y += GAP;
-
-        // Auto-start engine
-        hCheckAutoStart = CreateWindowExW(0, L"BUTTON", L"Auto-start local engine", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, EX, y, 200, 20, h, (HMENU)IDC_AUTOSTART_CHECK, hI, 0);
-        SendMessageW(hCheckAutoStart, WM_SETFONT, (WPARAM)hFontSettings, TRUE);
-        SendMessageW(hCheckAutoStart, BM_SETCHECK, g_config.autoStartEngine ? BST_CHECKED : BST_UNCHECKED, 0);
-        y += GAP + 8;
-
-        // Save + Test buttons
-        HWND hBtnSave = CreateWindowExW(0, L"BUTTON", L"Save", WS_CHILD|WS_VISIBLE, EX, y, 100, 30, h, (HMENU)IDC_BTN_SAVE, hI, 0);
-        SendMessageW(hBtnSave, WM_SETFONT, (WPARAM)hFontSettings, TRUE);
-        HWND hBtnTest = CreateWindowExW(0, L"BUTTON", L"Test Connection", WS_CHILD|WS_VISIBLE, EX+110, y, 130, 30, h, (HMENU)IDC_BTN_TEST, hI, 0);
-        SendMessageW(hBtnTest, WM_SETFONT, (WPARAM)hFontSettings, TRUE);
+        // Buttons
+        HWND hBtnTest = CreateWindowExW(0, L"BUTTON", L"Test Connection", WS_CHILD | WS_VISIBLE,
+                                         120, y, 130, 30, h, (HMENU)IDC_TEST_BTN, 0, 0);
+        SendMessageW(hBtnTest, WM_SETFONT, (WPARAM)hSettingsFont, TRUE);
+        HWND hBtnSave = CreateWindowExW(0, L"BUTTON", L"Save Settings", WS_CHILD | WS_VISIBLE,
+                                         260, y, 130, 30, h, (HMENU)IDC_SAVE_BTN, 0, 0);
+        SendMessageW(hBtnSave, WM_SETFONT, (WPARAM)hSettingsFont, TRUE);
         y += 38;
 
         // Status label
-        hLabelStatus = CreateWindowExW(0, L"STATIC", L"", WS_CHILD|WS_VISIBLE|SS_CENTER, LX, y, EX+EW-LX, 20, h, 0, hI, 0);
-        SendMessageW(hLabelStatus, WM_SETFONT, (WPARAM)hFontSettings, TRUE);
+        hLabelStatus = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_CENTER,
+                                        10, y, 400, 24, h, (HMENU)IDC_STATUS_LBL, 0, 0);
+        SendMessageW(hLabelStatus, WM_SETFONT, (WPARAM)hSettingsFont, TRUE);
+
+        // Populate fields from current config
+        PopulateSettingsFromConfig();
         return 0;
     }
 
     case WM_COMMAND:
         switch (LOWORD(w)) {
-        case IDC_PROVIDER_COMBO:
-            if (HIWORD(w) == CBN_SELCHANGE) {
-                int sel = (int)SendMessageW(hComboProvider, CB_GETCURSEL, 0, 0);
-                if (sel >= 0 && sel < PROVIDER_COUNT) {
-                    const auto& p = g_providerPresets[sel];
-                    SetWindowTextW(hEditHost, StringToWString(p.defaultHost).c_str());
-                    SetWindowTextW(hEditPort, std::to_wstring(p.defaultPort).c_str());
-                    SetWindowTextW(hEditModel, StringToWString(p.defaultModel).c_str());
-                    SetWindowTextW(hEditEndpoint, StringToWString(p.defaultEndpoint).c_str());
-                    SendMessageW(hCheckSSL, BM_SETCHECK, p.useSSL ? BST_CHECKED : BST_UNCHECKED, 0);
-                    SetWindowTextW(hLabelStatus, L"");
-                }
-            }
+        case IDC_COMBO_PROV:
+            if (HIWORD(w) == CBN_SELCHANGE) OnProviderChanged();
             break;
 
-        case IDC_BTN_SAVE: {
-            // Read all fields back into g_config
-            g_config.provider = (int)SendMessageW(hComboProvider, CB_GETCURSEL, 0, 0);
-            wchar_t buf[512];
-            GetWindowTextW(hEditHost, buf, 512); g_config.host = WStringToString(buf);
-            GetWindowTextW(hEditPort, buf, 512); g_config.port = _wtoi(buf);
-            GetWindowTextW(hEditApiKey, buf, 512); g_config.apiKey = WStringToString(buf);
-            GetWindowTextW(hEditModel, buf, 512); g_config.model = WStringToString(buf);
-            GetWindowTextW(hEditEndpoint, buf, 512); g_config.endpointPath = WStringToString(buf);
-            g_config.useSSL = (SendMessageW(hCheckSSL, BM_GETCHECK, 0, 0) == BST_CHECKED);
-            GetWindowTextW(hEditTemp, buf, 512); g_config.temperature = (float)_wtof(buf);
-            GetWindowTextW(hEditMaxTok, buf, 512); g_config.maxTokens = _wtoi(buf);
-            GetWindowTextW(hEditCtxSize, buf, 512); g_config.contextSize = _wtoi(buf);
-            GetWindowTextW(hEditGpuLayers, buf, 512); g_config.gpuLayers = _wtoi(buf);
-            g_config.autoStartEngine = (SendMessageW(hCheckAutoStart, BM_GETCHECK, 0, 0) == BST_CHECKED);
-
-            SaveConfig();
-            SetWindowTextW(hLabelStatus, L"\u2705  Settings saved!");
-            // Refresh indicator to show new provider
-            if (hIndicator) InvalidateRect(hIndicator, nullptr, FALSE);
-            break;
-        }
-
-        case IDC_BTN_TEST: {
-            SetWindowTextW(hLabelStatus, L"Testing...");
-            // Quick connection test in a thread
-            std::thread([]() {
+        case IDC_TEST_BTN: {
+            SetWindowTextW(hLabelStatus, L"\u23F3  Testing connection...");
+            std::thread([h]() {
+                // Quick connectivity test
                 wchar_t buf[512];
                 GetWindowTextW(hEditHost, buf, 512); std::string testHost = WStringToString(buf);
                 GetWindowTextW(hEditPort, buf, 512); int testPort = _wtoi(buf);
-                bool ssl = (SendMessageW(hCheckSSL, BM_GETCHECK, 0, 0) == BST_CHECKED);
 
                 HINTERNET hS = InternetOpenW(L"NovaTest", 1, 0, 0, 0);
+                DWORD to = 5000;
+                InternetSetOptionW(hS, INTERNET_OPTION_CONNECT_TIMEOUT, &to, sizeof(to));
+                InternetSetOptionW(hS, INTERNET_OPTION_RECEIVE_TIMEOUT, &to, sizeof(to));
+
                 bool ok = false;
                 if (hS) {
-                    DWORD to = 5000;
-                    InternetSetOptionA(hS, INTERNET_OPTION_CONNECT_TIMEOUT, &to, sizeof(to));
-                    InternetSetOptionA(hS, INTERNET_OPTION_RECEIVE_TIMEOUT, &to, sizeof(to));
-                    HINTERNET hC = InternetConnectW(hS, StringToWString(testHost).c_str(), (INTERNET_PORT)testPort, 0, 0, INTERNET_SERVICE_HTTP, 0, 0);
+                    HINTERNET hC = InternetConnectW(hS, StringToWString(testHost).c_str(),
+                                                    (INTERNET_PORT)testPort, 0, 0, 3, 0, 0);
                     if (hC) {
-                        DWORD flags = INTERNET_FLAG_RELOAD;
-                        if (ssl) flags |= INTERNET_FLAG_SECURE;
-                        HINTERNET hR = HttpOpenRequestW(hC, L"GET", L"/", 0, 0, 0, flags, 0);
-                        if (hR) {
-                            if (ssl) {
-                                DWORD sf = 0; DWORD ss = sizeof(sf);
-                                InternetQueryOptionW(hR, INTERNET_OPTION_SECURITY_FLAGS, &sf, &ss);
-                                sf |= SECURITY_FLAG_IGNORE_UNKNOWN_CA | SECURITY_FLAG_IGNORE_CERT_CN_INVALID;
-                                InternetSetOptionW(hR, INTERNET_OPTION_SECURITY_FLAGS, &sf, sizeof(sf));
-                            }
-                            ok = HttpSendRequestA(hR, 0, 0, 0, 0) ? true : false;
-                            InternetCloseHandle(hR);
-                        }
+                        HINTERNET hR = HttpOpenRequestW(hC, L"GET", L"/", 0, 0, 0,
+                            INTERNET_FLAG_RELOAD | (testPort == 443 ? INTERNET_FLAG_SECURE | INTERNET_FLAG_IGNORE_CERT_CN_INVALID | INTERNET_FLAG_IGNORE_CERT_DATE_INVALID : 0), 0);
+                        if (hR) { ok = HttpSendRequestA(hR, 0, 0, 0, 0) ? true : false; InternetCloseHandle(hR); }
                         InternetCloseHandle(hC);
                     }
                     InternetCloseHandle(hS);
                 }
-                PostMessageW(g_hSettingsWnd, WM_APP + 100, (WPARAM)ok, 0);
+                PostMessageW(h, WM_APP + 100, (WPARAM)ok, 0);
             }).detach();
+            break;
+        }
+
+        case IDC_SAVE_BTN: {
+            wchar_t buf[512];
+            int sel = (int)SendMessageW(hComboProvider, CB_GETCURSEL, 0, 0);
+            if (sel >= 0 && sel < PROV_COUNT) {
+                g_config.provider     = (ProviderType)sel;
+                g_config.useSSL       = g_providerPresets[sel].needsSSL;
+                g_config.endpointPath = g_providerPresets[sel].defaultEndpoint;
+            }
+
+            GetWindowTextW(hEditHost, buf, 512);     g_config.host = WStringToString(buf);
+            GetWindowTextW(hEditPort, buf, 512);     g_config.port = _wtoi(buf);
+            GetWindowTextW(hEditApiKey, buf, 512);   g_config.apiKey = WStringToString(buf);
+            GetWindowTextW(hEditModel, buf, 512);    g_config.model = WStringToString(buf);
+            GetWindowTextW(hEditTemp, buf, 512);     g_config.temperature = (float)_wtof(buf);
+            GetWindowTextW(hEditMaxTok, buf, 512);   g_config.maxTokens = _wtoi(buf);
+            GetWindowTextW(hEditCtx, buf, 512);      g_config.contextSize = _wtoi(buf);
+            GetWindowTextW(hEditGpu, buf, 512);      g_config.gpuLayers = _wtoi(buf);
+            GetWindowTextW(hEditModelPath, buf, 512); g_config.modelPath = WStringToString(buf);
+            g_config.autoStartEngine = (SendMessageW(hCheckAutoStart, BM_GETCHECK, 0, 0) == BST_CHECKED);
+
+            SaveConfig();
+            SetWindowTextW(hLabelStatus, L"\u2705  Settings saved!");
+            if (hIndicator) InvalidateRect(hIndicator, nullptr, FALSE);
             break;
         }
         }
         return 0;
 
-    case WM_APP + 100:  // Test result
+    case WM_APP + 100:  // Test result callback
         SetWindowTextW(hLabelStatus, w ? L"\u2705  Connection successful!" : L"\u274C  Connection failed. Check settings.");
         return 0;
 
     case WM_CLOSE:
-        DestroyWindow(h); return 0;
+        DestroyWindow(h);
+        return 0;
 
     case WM_DESTROY:
-        if (hFontSettings) { DeleteObject(hFontSettings); hFontSettings = nullptr; }
-        g_hSettingsWnd = nullptr;
+        if (hSettingsFont) { DeleteObject(hSettingsFont); hSettingsFont = nullptr; }
+        if (hSettingsFontBold) { DeleteObject(hSettingsFontBold); hSettingsFontBold = nullptr; }
+        hSettingsWnd = nullptr;
+        hComboProvider = nullptr;
+        hEditHost = hEditPort = hEditApiKey = hEditModel = nullptr;
+        hEditTemp = hEditMaxTok = hEditCtx = hEditGpu = hEditModelPath = nullptr;
+        hCheckAutoStart = nullptr;
+        hLabelStatus = nullptr;
         return 0;
     }
     return DefWindowProcW(h, m, w, l);
 }
 
-void OpenSettingsDialog() {
-    if (g_hSettingsWnd && IsWindow(g_hSettingsWnd)) {
-        SetForegroundWindow(g_hSettingsWnd); return;
-    }
-    HINSTANCE hI = (HINSTANCE)GetWindowLongPtrW(hMainWnd, GWLP_HINSTANCE);
+void ShowSettingsDialog(HWND parent) {
+    if (hSettingsWnd) { SetForegroundWindow(hSettingsWnd); return; } // Don't open twice
 
-    static bool registered = false;
-    if (!registered) {
+    static bool classRegistered = false;
+    HINSTANCE hInst = (HINSTANCE)GetWindowLongPtrW(parent, GWLP_HINSTANCE);
+    if (!classRegistered) {
         WNDCLASSEXW wc = { sizeof(wc) };
-        wc.lpfnWndProc = SettingsWndProc; wc.hInstance = hI;
-        wc.hCursor = LoadCursor(0, IDC_ARROW); wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE+1);
-        wc.lpszClassName = L"NovaSettings";
-        RegisterClassExW(&wc); registered = true;
+        wc.style         = CS_HREDRAW | CS_VREDRAW;
+        wc.lpfnWndProc   = SettingsWndProc;
+        wc.hInstance      = hInst;
+        wc.hCursor        = LoadCursor(nullptr, IDC_ARROW);
+        wc.hbrBackground  = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.lpszClassName  = L"NovaSettings";
+        RegisterClassExW(&wc);
+        classRegistered = true;
     }
 
-    RECT mainRect; GetWindowRect(hMainWnd, &mainRect);
-    int sx = mainRect.right + 10, sy = mainRect.top;
-
-    g_hSettingsWnd = CreateWindowExW(WS_EX_TOOLWINDOW, L"NovaSettings", L"Nova Settings",
+    hSettingsWnd = CreateWindowExW(WS_EX_TOOLWINDOW, L"NovaSettings", L"Nova Settings",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
-        sx, sy, 440, 520, hMainWnd, 0, hI, 0);
+        CW_USEDEFAULT, CW_USEDEFAULT, 440, 560, parent, 0, hInst, 0);
 }
-
-// ────────────────────────────────────────────────────────────────
-// LAYOUT  (6 buttons)
-// ────────────────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════
+// LAYOUT
+// ════════════════════════════════════════════════════════════════
 void LayoutControls(HWND hwnd) {
     RECT r; GetClientRect(hwnd, &r);
     int W = r.right, H = r.bottom;
     int fontH = 18;
     HDC hdc = GetDC(hEditInput);
     if (hdc) {
-        HFONT hOld = (HFONT)SelectObject(hdc, hFontMain);
+        HFONT hOldF = (HFONT)SelectObject(hdc, hFontMain);
         TEXTMETRICW tm = {}; GetTextMetricsW(hdc, &tm);
-        SelectObject(hdc, hOld); ReleaseDC(hEditInput, hdc);
+        SelectObject(hdc, hOldF); ReleaseDC(hEditInput, hdc);
         if (tm.tmHeight > 0) fontH = tm.tmHeight;
     }
+
     const int PAD      = 7;
     const int INPUT_H  = fontH + PAD * 2;
-    const int LABEL_H  = 18;
+    const int LABEL_H  = 10;
     const int BTN_H    = 32;
     const int INPUT_Y  = H - 12 - INPUT_H;
     const int LABEL_Y  = INPUT_Y - 4 - LABEL_H;
     const int BTN_Y    = LABEL_Y - 2 - BTN_H;
     const int DISP_H   = BTN_Y - 10 - 42;
 
-    SetWindowPos(hIndicator, 0, 12, 8, 130, 24, SWP_NOZORDER);
-    SetWindowPos(hEditDisplay, 0, 15,  42, W-30, DISP_H, SWP_NOZORDER);
+    SetWindowPos(hIndicator, 0, 12, 8, W - 24, 30, SWP_NOZORDER);
+    SetWindowPos(hEditDisplay, 0, 15, 42, W - 30, DISP_H, SWP_NOZORDER);
 
-    // 6 buttons: 75px each, 7px gap = 485px total
-    const int BTN_W = 75, BTN_GAP = 7;
-    int totalBtnW = BTN_W * 6 + BTN_GAP * 5;
-    int x = (W - totalBtnW) / 2;
-    SetWindowPos(hButtonSend,     0, x,                            BTN_Y, BTN_W, BTN_H, SWP_NOZORDER);
-    SetWindowPos(hButtonClear,    0, x + (BTN_W+BTN_GAP),          BTN_Y, BTN_W, BTN_H, SWP_NOZORDER);
-    SetWindowPos(hButtonMute,     0, x + (BTN_W+BTN_GAP)*2,        BTN_Y, BTN_W, BTN_H, SWP_NOZORDER);
-    SetWindowPos(hButtonDev,      0, x + (BTN_W+BTN_GAP)*3,        BTN_Y, BTN_W, BTN_H, SWP_NOZORDER);
-    SetWindowPos(hButtonAttach,   0, x + (BTN_W+BTN_GAP)*4,        BTN_Y, BTN_W, BTN_H, SWP_NOZORDER);
-    SetWindowPos(hButtonSettings, 0, x + (BTN_W+BTN_GAP)*5,        BTN_Y, BTN_W, BTN_H, SWP_NOZORDER);
+    // 7 buttons: 65px each, 8px gap
+    const int BTN_W = 65, GAP = 8;
+    int totalW = BTN_W * 7 + GAP * 6;
+    int x = (W - totalW) / 2;
+    SetWindowPos(hButtonSend,     0, x,                   BTN_Y, BTN_W, BTN_H, SWP_NOZORDER);
+    SetWindowPos(hButtonStop,     0, x + (BTN_W + GAP),   BTN_Y, BTN_W, BTN_H, SWP_NOZORDER);
+    SetWindowPos(hButtonClear,    0, x + (BTN_W + GAP)*2, BTN_Y, BTN_W, BTN_H, SWP_NOZORDER);
+    SetWindowPos(hButtonMute,     0, x + (BTN_W + GAP)*3, BTN_Y, BTN_W, BTN_H, SWP_NOZORDER);
+    SetWindowPos(hButtonDev,      0, x + (BTN_W + GAP)*4, BTN_Y, BTN_W, BTN_H, SWP_NOZORDER);
+    SetWindowPos(hButtonAttach,   0, x + (BTN_W + GAP)*5, BTN_Y, BTN_W, BTN_H, SWP_NOZORDER);
+    SetWindowPos(hButtonSettings, 0, x + (BTN_W + GAP)*6, BTN_Y, BTN_W, BTN_H, SWP_NOZORDER);
 
     SetWindowPos(hAttachLabel, 0, 15, LABEL_Y, W - 30, LABEL_H, SWP_NOZORDER);
+    SetWindowPos(hEditInput, 0, 15, INPUT_Y, W - 30, INPUT_H, SWP_NOZORDER);
 
-    SetWindowPos(hEditInput, 0, 15, INPUT_Y, W-30, INPUT_H, SWP_NOZORDER);
     RECT rcC = {}; GetClientRect(hEditInput, &rcC);
-    int topPad = max(1, (int)((rcC.bottom - fontH) / 2));
+    int topPad = std::max<int>(1, (int)((rcC.bottom - fontH) / 2));
     RECT rTxt = { 2, topPad, rcC.right - 2, rcC.bottom - topPad };
     SendMessageW(hEditInput, EM_SETRECT, 0, (LPARAM)&rTxt);
 }
 
+// ════════════════════════════════════════════════════════════════
+// EDIT SUBCLASS (Enter key, focus highlight)
+// ════════════════════════════════════════════════════════════════
 LRESULT CALLBACK EditSubclassProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_CHAR && w == VK_RETURN) return 0;
     if (m == WM_KEYDOWN && w == VK_RETURN) { ProcessChat(); return 0; }
@@ -2170,8 +2110,10 @@ LRESULT CALLBACK EditSubclassProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (hdc) {
             RECT rc; GetWindowRect(h, &rc); OffsetRect(&rc, -rc.left, -rc.top);
             COLORREF col = (GetFocus() == h) ? RGB(0, 120, 215) : RGB(180, 180, 180);
-            HPEN hPen = CreatePen(PS_SOLID, 2, col); HBRUSH hNull = (HBRUSH)GetStockObject(NULL_BRUSH);
-            HPEN hOldP = (HPEN)SelectObject(hdc, hPen); HBRUSH hOldB = (HBRUSH)SelectObject(hdc, hNull);
+            HPEN hPen = CreatePen(PS_SOLID, 2, col);
+            HBRUSH hNull = (HBRUSH)GetStockObject(NULL_BRUSH);
+            HPEN hOldP = (HPEN)SelectObject(hdc, hPen);
+            HBRUSH hOldB = (HBRUSH)SelectObject(hdc, hNull);
             Rectangle(hdc, rc.left+1, rc.top+1, rc.right-1, rc.bottom-1);
             SelectObject(hdc, hOldP); SelectObject(hdc, hOldB);
             DeleteObject(hPen); ReleaseDC(h, hdc);
@@ -2181,50 +2123,49 @@ LRESULT CALLBACK EditSubclassProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     return CallWindowProcW(OldEditProc, h, m, w, l);
 }
 
-// ────────────────────────────────────────────────────────────────
-// APP STATE & PERSISTENCE HELPERS
-// ────────────────────────────────────────────────────────────────
-void SavePersonality(const std::string& n) {
-    std::ofstream f(GetExeDir() + g_personalityFile);
-    if (f) {
-        f << n;
-        DevLog("[Personality] Personality file updated successfully.\n");
-    } else {
-        DevLog("[Personality] ERROR: Could not save personality file!\n");
-    }
-}
-
+// ════════════════════════════════════════════════════════════════
+// APP STATE
+// ════════════════════════════════════════════════════════════════
 void SetAppState(AppState s) {
-    g_appState = s;
-    if (hIndicator) {
-        InvalidateRect(hIndicator, nullptr, FALSE);
-        UpdateWindow(hIndicator); 
-    }
+    g_appState.store(s);
+    if (hIndicator) { InvalidateRect(hIndicator, nullptr, FALSE); UpdateWindow(hIndicator); }
 }
 
-// ────────────────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════
 // MAIN WINDOW PROC
-// ────────────────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════
 LRESULT CALLBACK WindowProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
     case WM_SIZE: LayoutControls(h); return 0;
     case WM_GETMINMAXINFO: ((MINMAXINFO*)l)->ptMinTrackSize = { MIN_WIN_W, MIN_WIN_H }; return 0;
+
     case WM_COMMAND:
-        switch (LOWORD(w)) {
-        case 1: ProcessChat(); break;
-        case 2:
+    switch (LOWORD(w)) {
+        case IDC_BTN_SEND:
+            ProcessChat();
+            break;
+
+        case IDC_BTN_STOP:
+            if (AppStateManager::Instance().aiRunning.load()) {
+                DevLog("[UI] Abort clicked. Signaling inference engine...\n");
+                AppStateManager::Instance().abortInference.store(true); 
+                EnableWindow(hButtonStop, FALSE);
+            }
+            break;
+        // -------------------------------
+
+        case IDC_BTN_CLEAR:
             SetWindowTextW(hEditDisplay, L"");
             { std::lock_guard<std::mutex> lk(historyMutex); conversationHistory.clear(); }
             ClearAttachment();
             SaveHistory(); break;
-        case 3:
+
+        case IDC_BTN_MUTE:
             g_muted = !g_muted;
-            if (g_muted) {
-                std::lock_guard<std::mutex> lk(g_voiceMutex);
-                if (g_pVoice) g_pVoice->Speak(L"", SPF_ASYNC | SPF_PURGEBEFORESPEAK, nullptr);
-            }
+            if (g_muted) { std::lock_guard<std::mutex> lk(g_voiceMutex); if (g_pVoice) g_pVoice->Speak(L"", SPF_ASYNC | SPF_PURGEBEFORESPEAK, nullptr); }
             SetWindowTextW(hButtonMute, g_muted ? L"Unmute" : L"Mute"); break;
-        case 4:
+
+        case IDC_BTN_DEV:
             if (!consoleAllocated) {
                 AllocConsole();
                 SetConsoleTitleW(L"Nova Dev Console");
@@ -2232,24 +2173,18 @@ LRESULT CALLBACK WindowProc(HWND h, UINT m, WPARAM w, LPARAM l) {
                 freopen_s(&fOut, "CONOUT$", "w", stdout);
                 freopen_s(&fErr, "CONOUT$", "w", stderr);
                 HWND hCon = GetConsoleWindow();
-                if (hCon) {
-                    HMENU hMenu = GetSystemMenu(hCon, FALSE);
-                    if (hMenu) DeleteMenu(hMenu, SC_CLOSE, MF_BYCOMMAND);
-                }
+                if (hCon) { HMENU hMenu = GetSystemMenu(hCon, FALSE); if (hMenu) DeleteMenu(hMenu, SC_CLOSE, MF_BYCOMMAND); }
                 consoleAllocated = true;
-
                 std::ifstream logIn(GetExeDir() + g_devLogFile);
-                if (logIn) {
-                    std::string logLine;
-                    while (std::getline(logIn, logLine)) printf("%s\n", logLine.c_str());
-                    printf("--- (end of buffered log) ---\n");
-                    fflush(stdout);
-                }
+                if (logIn) { std::string logLine; while (std::getline(logIn, logLine)) printf("%s\n", logLine.c_str());
+                             printf("--- (end of buffered log) ---\n"); fflush(stdout); }
                 DevLog("Dev Console attached — live logging active\n");
             }
             break;
-        case 5: OpenAttachDialog(); break;
-        case 6: OpenSettingsDialog(); break;
+
+        case IDC_BTN_ATTACH: OpenAttachDialog(); break;
+
+        case IDC_BTN_SETTINGS: ShowSettingsDialog(h); break;
         }
         return 0;
 
@@ -2260,68 +2195,32 @@ LRESULT CALLBACK WindowProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         delete[] heapStr;
 
         if (reply.size() > 10000) reply = reply.substr(0, 10000) + L"\n[Truncated]";
-        for (auto& c : reply) if (c < 32 && c != '\r' && c != '\n') c = L' ';
-
         std::string cleanReply = WStringToString(reply);
+
         if (ok) {
-            std::vector<std::string> cmds;
-            std::istringstream scanner(cleanReply);
-            std::string line;
-            while (std::getline(scanner, line)) {
-                size_t start = line.find_first_not_of(" \t\r");
-                if (start == std::string::npos) continue;
-                line = line.substr(start);
-                if (line.compare(0, 5, "EXEC:") != 0) continue;
-
-                std::string cmd = line.substr(5);
-                size_t cs = cmd.find_first_not_of(" \t"), ce = cmd.find_last_not_of(" \t\r\n");
-                if (cs == std::string::npos) continue;
-                cmd = cmd.substr(cs, ce - cs + 1);
-
-                std::string lowerCmd = cmd;
-                std::transform(lowerCmd.begin(), lowerCmd.end(), lowerCmd.begin(), [](unsigned char c) { 
-                    return (char)::tolower(c); 
-                });
-
-                if (lowerCmd.find("set-content") != std::string::npos && lowerCmd.find("&& cl") != std::string::npos) {
-                    size_t clPos = lowerCmd.find("&& cl");
-                    size_t splitAt = clPos;
-                    for (size_t i = clPos; i-- > 0; ) {
-                        if (cmd[i] == '\'' || cmd[i] == '"') { splitAt = i + 1; break; }
-                    }
-
-                    std::string part1 = cmd.substr(0, splitAt);
-                    std::string part2 = cmd.substr(clPos + 2);
-
-                    size_t p1e = part1.find_last_not_of(" \t\r\n\"'");
-                    if (p1e != std::string::npos) part1 = part1.substr(0, p1e + 1);
-                    size_t p2s = part2.find_first_not_of(" \t\r\n\"'");
-                    if (p2s != std::string::npos) part2 = part2.substr(p2s);
-
-                    if (!part1.empty()) cmds.push_back(part1);
-                    if (!part2.empty()) cmds.push_back(part2);
-                } else {
-                    cmds.push_back(cmd);
+            size_t execPos = cleanReply.find("EXEC:");
+            if (execPos != std::string::npos) {
+                std::string cmd = cleanReply.substr(execPos + 5);
+                
+                // ANTI-HALLUCINATION: Slice string at the first newline
+                size_t newLinePos = cmd.find_first_of("\r\n");
+                if (newLinePos != std::string::npos) {
+                    cmd = cmd.substr(0, newLinePos);
                 }
-            }
 
-            if (!cmds.empty()) {
-                std::thread([cmds]() mutable {
-                    for (const auto& c : cmds) ExecuteNovaCommand(c);
-                    PostMessageW(hMainWnd, WM_EXEC_DONE, 0, 0);
-                }).detach();
-            }
-
-            // Personality evolution (only for local llama-server)
-            if (g_config.provider == 0) {
-                std::string currentP = LoadPersonality();
-                std::thread([currentP, cleanReply]() { EvolvePersonality(currentP, cleanReply); }).detach();
+                size_t first = cmd.find_first_not_of(" \t");
+                size_t last = cmd.find_last_not_of(" \t");
+                if (first != std::string::npos) {
+                    cmd = cmd.substr(first, last - first + 1);
+                    ExecuteNovaCommand(cmd, (cmd.find("cl") != std::string::npos));
+                }
             }
         }
 
         AppendRichText(hEditDisplay, L"Nova: ", true, RGB(0, 120, 215));
         AppendRichText(hEditDisplay, (ok ? reply : L"[No response]") + L"\r\n\r\n", false, RGB(30, 30, 30));
 
+        SetWindowTextW(hButtonSend, L"Send"); 
         EnableWindow(hButtonSend, TRUE);
         aiRunning = false;
         SetAppState(ok ? AppState::Online : AppState::Offline);
@@ -2329,143 +2228,190 @@ LRESULT CALLBACK WindowProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         return 0;
     }
 
-    case WM_ENGINE_READY:
-        DevLog("[System] Engine confirmed live — UI unlocked\n");
-        SetAppState(AppState::Online);
-        return 0;
+    case WM_EXEC_DONE: {
+        if (!AppStateManager::Instance().abortInference.load()) {
+            // 1. Read the shell output from the batch file
+            std::string oPath = GetExeDir() + "nova_exec_out.txt";
+            std::ifstream inFile(oPath);
+            std::string output((std::istreambuf_iterator<char>(inFile)), std::istreambuf_iterator<char>());
+            inFile.close();
+            DeleteFileA(oPath.c_str());
 
-    case WM_EXEC_DONE:
-        DevLog("[System] Background command execution complete\n");
+            // 2. Format the feedback
+            std::string statusMessage;
+            if (output.empty()) {
+                statusMessage = "SUCCESS: Command completed with no errors.";
+            } else {
+                // Prevent massive log dumps from crashing the context window
+                if (output.size() > 2000) output = output.substr(0, 2000) + "\n... [Truncated]";
+                statusMessage = "SHELL OUTPUT:\n" + output;
+            }
+
+            // 3. Show it in the UI using your native RichText function
+            std::wstring wStatus = StringToWString(statusMessage);
+            AppendRichText(hEditDisplay, L"\r\n[SYSTEM FEEDBACK]:\r\n", true, RGB(255, 140, 0));
+            AppendRichText(hEditDisplay, wStatus + L"\r\n", false, RGB(120, 120, 120));
+
+            // 4. Feed it back into Nova's brain so she can self-correct
+            std::wstring feedback = L"[SYSTEM FEEDBACK]:\n" + wStatus;
+            std::thread([feedback]() { 
+                AIThreadFunc(feedback, "", false, Attachment()); 
+            }).detach();
+            
+        } else {
+            // User hit the Stop button
+            AppStateManager::Instance().aiRunning.store(false);
+            AppStateManager::Instance().abortInference.store(false);
+            SetWindowTextW(hButtonSend, L"Send");
+            EnableWindow(hButtonSend, TRUE);
+        }
         return 0;
+    }
 
     case WM_CLOSE:
         if (aiRunning && MessageBoxW(h, L"Nova is thinking. Exit?", L"Nova", MB_YESNO) != IDYES) return 0;
-        DestroyWindow(h); return 0;
+        DestroyWindow(h);
+        return 0;
 
     case WM_DESTROY:
         StopLocalEngine();
-        // Close Settings window if open
-        if (g_hSettingsWnd && IsWindow(g_hSettingsWnd)) DestroyWindow(g_hSettingsWnd);
         Gdiplus::GdiplusShutdown(g_gdipToken);
-        DeleteObject(hFontMain); DeleteObject(hFontBtn); DeleteObject(hFontIndicator);
-        { std::lock_guard<std::mutex> lk(g_voiceMutex); if (g_pVoice) { g_pVoice->Release(); g_pVoice = nullptr; } }
-        CoUninitialize(); PostQuitMessage(0); return 0;
-    }
-    return DefWindowProcW(h, m, w, l);
-}
+        DeleteObject(hFontMain); 
+        DeleteObject(hFontBtn); 
+        DeleteObject(hFontIndicator);
+        { 
+            std::lock_guard<std::mutex> lk(g_voiceMutex); 
+            if (g_pVoice) { g_pVoice->Release(); g_pVoice = nullptr; } 
+        }
+        CoUninitialize();
+        PostQuitMessage(0);
+        return 0;
 
-// ────────────────────────────────────────────────────────────────
+    } // This closes the switch(m) statement
+
+    return DefWindowProcW(h, m, w, l);
+} // This closes the WindowProc function
+
+// ════════════════════════════════════════════════════════════════
 // ENTRY POINT
-// ────────────────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════
 int WINAPI WinMain(HINSTANCE hI, HINSTANCE, LPSTR, int) {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-
-    // Load config first — drives all subsequent decisions
-    LoadConfig();
-
-    // Initialize Voice Engine
+    
+    // TTS Setup — Female American Voice (Zira)
     if (SUCCEEDED(CoCreateInstance(CLSID_SpVoice, nullptr, CLSCTX_ALL, IID_ISpVoice, (void**)&g_pVoice))) {
-        g_pVoice->SetRate(-1);
-
-        ISpObjectTokenCategory* pCategory = NULL;
-        IEnumSpObjectTokens* pEnum = NULL;
-        if (SUCCEEDED(CoCreateInstance(CLSID_SpObjectTokenCategory, NULL, CLSCTX_ALL, IID_ISpObjectTokenCategory, (void**)&pCategory))) {
-            if (SUCCEEDED(pCategory->SetId(SPCAT_VOICES, FALSE))) {
-                if (SUCCEEDED(pCategory->EnumTokens(L"Gender=Female;Language=409", NULL, &pEnum))) {
-                    ISpObjectToken* pToken = NULL;
+	g_pVoice->SetRate(4);
+        ISpObjectTokenCategory* pCat = nullptr;
+        if (SUCCEEDED(CoCreateInstance(CLSID_SpObjectTokenCategory, NULL, CLSCTX_ALL, IID_ISpObjectTokenCategory, (void**)&pCat))) {
+            if (SUCCEEDED(pCat->SetId(SPCAT_VOICES, FALSE))) {
+                IEnumSpObjectTokens* pEnum = nullptr;
+                // Filter for Female, US English (409)
+                if (SUCCEEDED(pCat->EnumTokens(L"Gender=Female;Language=409", NULL, &pEnum))) {
+                    ISpObjectToken* pToken = nullptr;
                     if (SUCCEEDED(pEnum->Next(1, &pToken, NULL))) {
-                        g_pVoice->SetVoice(pToken); 
+                        g_pVoice->SetVoice(pToken);
                         pToken->Release();
                     }
                     pEnum->Release();
                 }
             }
-            pCategory->Release();
+            pCat->Release();
         }
+        g_pVoice->SetVolume(100);
+        g_pVoice->SetRate(-1); 
     }
 
-    Gdiplus::GdiplusStartupInput gdipInput; 
+    Gdiplus::GdiplusStartupInput gdipInput;
     Gdiplus::GdiplusStartup(&g_gdipToken, &gdipInput, NULL);
-    LoadLibraryW(L"msftedit.dll"); 
+    LoadLibraryW(L"msftedit.dll");
     InitCommonControls();
+
+    // Load config FIRST — everything depends on this
+    LoadConfig();
 
     hFontMain      = CreateFontW(17,0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,L"Segoe UI");
     hFontBtn       = CreateFontW(15,0,0,0,FW_MEDIUM,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,L"Segoe UI");
     hFontIndicator = CreateFontW(13,0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,L"Segoe UI");
 
+    // Register indicator class
     WNDCLASSEXW ic = { sizeof(ic) };
-    ic.style         = CS_HREDRAW | CS_VREDRAW;
+    ic.style = CS_HREDRAW | CS_VREDRAW;
     ic.lpfnWndProc   = IndicatorWndProc;
-    ic.hInstance     = hI;
-    ic.hCursor       = LoadCursor(nullptr, IDC_ARROW);
-    ic.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-    ic.lpszClassName = L"IndicatorCtrl";
+    ic.hInstance      = hI;
+    ic.hCursor        = LoadCursor(nullptr, IDC_ARROW);
+    ic.hbrBackground  = (HBRUSH)(COLOR_BTNFACE + 1);
+    ic.lpszClassName  = L"IndicatorCtrl";
     RegisterClassExW(&ic);
 
+    // Register main window class
     WNDCLASSEXW wc = { sizeof(wc) };
-    wc.style = CS_HREDRAW|CS_VREDRAW; 
-    wc.lpfnWndProc = WindowProc;
-    wc.hInstance = hI; 
-    wc.hCursor = LoadCursor(0, IDC_ARROW);
-    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE+1); 
-    wc.lpszClassName = L"NovaMain";
-    wc.hIcon = LoadIcon(hI, MAKEINTRESOURCE(1)); 
-    wc.hIconSm = LoadIcon(hI, MAKEINTRESOURCE(1));
+    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.lpfnWndProc   = WindowProc;
+    wc.hInstance      = hI;
+    wc.hCursor        = LoadCursor(0, IDC_ARROW);
+    wc.hbrBackground  = (HBRUSH)(COLOR_BTNFACE + 1);
+    wc.lpszClassName  = L"NovaMain";
+    wc.hIcon          = LoadIcon(hI, MAKEINTRESOURCE(1));
+    wc.hIconSm        = LoadIcon(hI, MAKEINTRESOURCE(1));
     RegisterClassExW(&wc);
 
-    hMainWnd = CreateWindowExW(0, L"NovaMain", L"Nova", WS_OVERLAPPEDWINDOW|WS_VISIBLE, 100, 100, 850, 850, 0, 0, hI, 0);
-    hIndicator     = CreateWindowExW(0, L"IndicatorCtrl", L"", WS_CHILD|WS_VISIBLE, 0,0,0,0, hMainWnd, 0, hI, 0);
-    hEditDisplay   = CreateWindowExW(WS_EX_CLIENTEDGE, MSFTEDIT_CLASS, L"", WS_CHILD|WS_VISIBLE|WS_VSCROLL|ES_MULTILINE|ES_READONLY, 0,0,0,0, hMainWnd, 0, hI, 0);
-    hEditInput     = CreateWindowExW(WS_EX_CLIENTEDGE, MSFTEDIT_CLASS, L"", WS_CHILD|WS_VISIBLE|ES_MULTILINE|ES_AUTOVSCROLL|ES_WANTRETURN, 0,0,0,0, hMainWnd, 0, hI, 0);
-    hButtonSend    = CreateWindowExW(0, L"BUTTON", L"Send",     WS_CHILD|WS_VISIBLE, 0,0,0,0, hMainWnd, (HMENU)1, hI, 0);
-    hButtonClear   = CreateWindowExW(0, L"BUTTON", L"Clear",    WS_CHILD|WS_VISIBLE, 0,0,0,0, hMainWnd, (HMENU)2, hI, 0);
-    hButtonMute    = CreateWindowExW(0, L"BUTTON", L"Mute",     WS_CHILD|WS_VISIBLE, 0,0,0,0, hMainWnd, (HMENU)3, hI, 0);
-    hButtonDev     = CreateWindowExW(0, L"BUTTON", L"Dev",      WS_CHILD|WS_VISIBLE, 0,0,0,0, hMainWnd, (HMENU)4, hI, 0);
-    hButtonAttach  = CreateWindowExW(0, L"BUTTON", L"Attach",   WS_CHILD|WS_VISIBLE, 0,0,0,0, hMainWnd, (HMENU)5, hI, 0);
-    hButtonSettings= CreateWindowExW(0, L"BUTTON", L"\u2699",   WS_CHILD|WS_VISIBLE, 0,0,0,0, hMainWnd, (HMENU)6, hI, 0);
-    hAttachLabel   = CreateWindowExW(0, L"STATIC", L"",         WS_CHILD|WS_VISIBLE|SS_CENTER, 0,0,0,0, hMainWnd, 0, hI, 0);
+    // Calculate centered coordinates for a narrower, sleeker window
+    int winW = 600; // The new narrower width
+    int winH = 650; // The new height
+    int winX = (GetSystemMetrics(SM_CXSCREEN) - winW) / 2;
+    int winY = (GetSystemMetrics(SM_CYSCREEN) - winH) / 2;
 
-    SendMessageW(hEditDisplay,   WM_SETFONT, (WPARAM)hFontMain, TRUE); 
-    SendMessageW(hEditInput,     WM_SETFONT, (WPARAM)hFontMain, TRUE);
-    SendMessageW(hButtonSend,    WM_SETFONT, (WPARAM)hFontBtn, TRUE); 
-    SendMessageW(hButtonClear,   WM_SETFONT, (WPARAM)hFontBtn, TRUE);
-    SendMessageW(hButtonMute,    WM_SETFONT, (WPARAM)hFontBtn, TRUE); 
-    SendMessageW(hButtonDev,     WM_SETFONT, (WPARAM)hFontBtn, TRUE);
-    SendMessageW(hButtonAttach,  WM_SETFONT, (WPARAM)hFontBtn, TRUE);
-    SendMessageW(hButtonSettings,WM_SETFONT, (WPARAM)hFontBtn, TRUE);
-    SendMessageW(hAttachLabel,   WM_SETFONT, (WPARAM)hFontIndicator, TRUE);
+    // Create main window and controls centered on the screen
+    hMainWnd = CreateWindowExW(0, L"NovaMain", L"Nova", WS_OVERLAPPEDWINDOW,
+                               winX, winY, winW, winH, 0, 0, hI, 0);
+
+    hIndicator    = CreateWindowExW(0, L"IndicatorCtrl", L"", WS_CHILD | WS_VISIBLE, 0,0,0,0, hMainWnd, 0, hI, 0);
+    hEditDisplay  = CreateWindowExW(WS_EX_CLIENTEDGE, MSFTEDIT_CLASS, L"",
+                                     WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY, 0,0,0,0, hMainWnd, 0, hI, 0);
+    hEditInput    = CreateWindowExW(WS_EX_CLIENTEDGE, MSFTEDIT_CLASS, L"",
+                                     WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN, 0,0,0,0, hMainWnd, 0, hI, 0);
+
+    hButtonSend = CreateWindowExW(0, L"BUTTON", L"Send", WS_CHILD | WS_VISIBLE, 0,0,0,0, hMainWnd, (HMENU)IDC_BTN_SEND, hI, 0);
+    hButtonStop = CreateWindowExW(0, L"BUTTON", L"Stop", WS_CHILD | WS_VISIBLE | WS_DISABLED, 0,0,0,0, hMainWnd, (HMENU)IDC_BTN_STOP, hI, 0);
+    hButtonClear    = CreateWindowExW(0, L"BUTTON", L"Clear",    WS_CHILD | WS_VISIBLE, 0,0,0,0, hMainWnd, (HMENU)IDC_BTN_CLEAR, hI, 0);
+    hButtonMute     = CreateWindowExW(0, L"BUTTON", L"Mute",     WS_CHILD | WS_VISIBLE, 0,0,0,0, hMainWnd, (HMENU)IDC_BTN_MUTE, hI, 0);
+    hButtonDev      = CreateWindowExW(0, L"BUTTON", L"Dev",      WS_CHILD | WS_VISIBLE, 0,0,0,0, hMainWnd, (HMENU)IDC_BTN_DEV, hI, 0);
+    hButtonAttach   = CreateWindowExW(0, L"BUTTON", L"Attach",   WS_CHILD | WS_VISIBLE, 0,0,0,0, hMainWnd, (HMENU)IDC_BTN_ATTACH, hI, 0);
+    hButtonSettings = CreateWindowExW(0, L"BUTTON", L"\u2699",   WS_CHILD | WS_VISIBLE, 0,0,0,0, hMainWnd, (HMENU)IDC_BTN_SETTINGS, hI, 0);
+    hAttachLabel    = CreateWindowExW(0, L"STATIC", L"",         WS_CHILD | WS_VISIBLE | SS_CENTER, 0,0,0,0, hMainWnd, 0, hI, 0);
+
+    // Apply fonts
+    for (HWND ctrl : { hEditDisplay, hEditInput }) SendMessageW(ctrl, WM_SETFONT, (WPARAM)hFontMain, TRUE);
+    for (HWND ctrl : { hButtonSend, hButtonStop, hButtonClear, hButtonMute, hButtonDev, hButtonAttach, hButtonSettings })
+        SendMessageW(ctrl, WM_SETFONT, (WPARAM)hFontBtn, TRUE);
+    SendMessageW(hAttachLabel, WM_SETFONT, (WPARAM)hFontIndicator, TRUE);
     SendMessageW(hEditInput, EM_EXLIMITTEXT, 0, (LPARAM)-1);
+
     OldEditProc = (WNDPROC)SetWindowLongPtrW(hEditInput, GWLP_WNDPROC, (LONG_PTR)EditSubclassProc);
 
-    // Start local engine if configured
-    if (g_config.autoStartEngine && g_config.provider == 0) {
-        SetAppState(AppState::Busy);
-        std::thread([] {
-            StartLocalEngine();
-            PostMessageW(hMainWnd, WM_ENGINE_READY, 0, 0);
-        }).detach();
-    } else {
-        SetAppState(AppState::Online);
-    }
+    // 1. Setup UI
+    LoadHistory();
+    LayoutControls(hMainWnd);
 
-    LoadHistory(); 
-    LayoutControls(hMainWnd); 
+    // 2. Start engine and WAIT for it (the 5s buffer happens here)
+    StartLocalEngine();
+
+    // 3. Finally show the window
+    ShowWindow(hMainWnd, SW_SHOW);
+    SetAppState(AppState::Online);
     SetFocus(hEditInput);
 
     DevLog("=== Nova Session Started ===\n");
+    DevLog("Provider   : %S\n", g_providerPresets[g_config.provider].displayName);
+    DevLog("Host       : %s:%d\n", g_config.host.c_str(), g_config.port);
+    DevLog("Model      : %s\n", g_config.model.c_str());
+    DevLog("SSL        : %s\n", g_config.useSSL ? "yes" : "no");
     DevLog("Exe dir    : %s\n", GetExeDir().c_str());
-    DevLog("Provider   : %d (%s)\n", g_config.provider, WStringToString(g_providerPresets[g_config.provider].displayName).c_str());
-    DevLog("Host       : %s:%d (SSL=%d)\n", g_config.host.c_str(), g_config.port, (int)g_config.useSSL);
-    DevLog("Model      : %s\n", g_config.model.empty() ? "(default)" : g_config.model.c_str());
-    DevLog("History    : %s (%zu chars)\n", g_historyFile.c_str(), conversationHistory.size());
-    DevLog("Personality: %s\n", g_personalityFile.c_str());
-    DevLog("TTS Voice  : %s\n", g_pVoice ? "Ready (Female forced)" : "NOT INITIALIZED");
+    DevLog("History    : %zu chars\n", conversationHistory.size());
+    DevLog("TTS Voice  : %s\n", g_pVoice ? "Ready" : "NOT INITIALIZED");
     DevLog("==================================\n");
 
-    MSG msg; 
-    while (GetMessageW(&msg, 0, 0, 0)) { 
-        TranslateMessage(&msg); 
-        DispatchMessageW(&msg); 
-    }
+    MSG msg;
+    while (GetMessageW(&msg, 0, 0, 0)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
     return (int)msg.wParam;
 }
