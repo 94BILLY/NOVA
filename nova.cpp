@@ -44,9 +44,9 @@
 #include <mutex>
 #include <fstream>
 #include <atomic>
-#include <filesystem>     // <--- REQUIRED for std::filesystem
-#include <unordered_map>  // <--- REQUIRED for Plugin storage
-#include <memory>         // <--- REQUIRED for UniqueHModule (unique_ptr)
+#include <filesystem>
+#include <unordered_map>
+#include <memory>   
 #include <richedit.h>
 #include <commctrl.h>
 // GDI+ uses bare min/max — provide them from std:: (NOMINMAX suppresses the Windows macros)
@@ -567,6 +567,23 @@ std::string GetExeDir() {
     return WStringToString(dir);
 }
 
+std::string IndexProjectDirectory(const std::string& targetPath) {
+    std::string indexMap = "PROJECT DIRECTORY MAP:\n";
+    
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(targetPath)) {
+        if (entry.is_regular_file()) {
+            std::string ext = entry.path().extension().string();
+            // Only index code files to save context window limits
+            if (ext == ".cpp" || ext == ".h" || ext == ".py" || ext == ".js") {
+                indexMap += "- " + entry.path().filename().string() + " (Path: " + entry.path().string() + ")\n";
+            }
+        }
+    }
+    
+    // Inject this map silently into the next LLM prompt so Nova "knows" the workspace
+    return indexMap;
+}
+
 std::string GetDesktopDir() {
     wchar_t path[MAX_PATH];
     if (SHGetSpecialFolderPathW(NULL, path, CSIDL_DESKTOP, FALSE))
@@ -1064,35 +1081,59 @@ void OpenAttachDialog() {
 // ════════════════════════════════════════════════════════════════
 // SYSTEM EXECUTION ENGINE
 // ════════════════════════════════════════════════════════════════
+
+// Define tracking globals somewhere at the top of your file if they aren't already:
+// std::string g_currentAgentDir = "";
+
 void ExecuteNovaCommand(const std::string& command, bool needsVS_Param) {
     std::string lower = command;
     std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return (char)::tolower(c); });
 
-    // 1. CWD Tracking
+    // 1. CWD Tracking (Allows Nova to remember where she is between commands)
     size_t cdPos = lower.find("cd /d ");
     if (cdPos != std::string::npos) {
         std::string newDir = command.substr(cdPos + 6);
         size_t end = newDir.find_first_of("&\r\n");
         if (end != std::string::npos) newDir = newDir.substr(0, end);
+        
+        // Remove quotes if present
         newDir.erase(std::remove(newDir.begin(), newDir.end(), '\"'), newDir.end());
+        newDir.erase(std::remove(newDir.begin(), newDir.end(), '\''), newDir.end());
+        
         g_currentAgentDir = newDir;
     }
 
     // 2. Set-Content Interceptor for Native Speed Write
+    // Bypasses PowerShell entirely for writing files to avoid shell escaping nightmare
     if (lower.find("set-content") != std::string::npos) {
         size_t pathPos = lower.find("-path '");
         size_t valPos = lower.find("-value '");
+        
+        // Handle double quotes as well
+        if (pathPos == std::string::npos) pathPos = lower.find("-path \"");
+        if (valPos == std::string::npos) valPos = lower.find("-value \"");
+
         if (pathPos != std::string::npos && valPos != std::string::npos) {
             std::string path = command.substr(pathPos + 7);
-            path = path.substr(0, path.find("'"));
-            std::string val = command.substr(valPos + 8);
-            val = val.substr(0, val.find_last_of("'"));
+            path = path.substr(0, path.find_first_of("'\"")); // Find closing quote
             
+            std::string val = command.substr(valPos + 8);
+            val = val.substr(0, val.find_last_of("'\"")); // Find closing quote
+            
+            // Replace PowerShell's newlines (`n) with actual C++ newlines
             size_t nPos = 0;
-            while ((nPos = val.find("`n", nPos)) != std::string::npos) { val.replace(nPos, 2, "\n"); nPos += 1; }
+            while ((nPos = val.find("`n", nPos)) != std::string::npos) { 
+                val.replace(nPos, 2, "\n"); 
+                nPos += 1; 
+            }
 
             std::ofstream f(path);
-            if (f) { f << val; f.close(); }
+            if (f) { 
+                f << val; 
+                f.close(); 
+            }
+            
+            // Signal UI that execution is done
             PostMessageW(hMainWnd, WM_EXEC_DONE, 0, 0);
             return; 
         }
@@ -1103,38 +1144,51 @@ void ExecuteNovaCommand(const std::string& command, bool needsVS_Param) {
         std::string exeDir = GetExeDir();
         std::string batPath = exeDir + "nova_run.bat";
         std::string outPath = exeDir + "nova_exec_out.txt";
+        
         std::ofstream bat(batPath);
-
         if (bat) {
             bat << "@echo off\n";
-            if (!g_currentAgentDir.empty()) bat << "cd /d \"" << g_currentAgentDir << "\"\n";
+            if (!g_currentAgentDir.empty()) {
+                bat << "cd /d \"" << g_currentAgentDir << "\"\n";
+            }
 
+            // Auto-detect Visual Studio environment if compiling C++
             if (needsVS_Param || lower.find("cl ") != std::string::npos || lower.find("cl.exe") != std::string::npos) {
                 std::string vcvars = "";
                 const char* searchPaths[] = {
-                    "C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64.bat",
-                    "C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat",
-                    "C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Enterprise\\VC\\Auxiliary\\Build\\vcvars64.bat",
-                    "C:\\Program Files\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64.bat",
                     "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat",
-                    "C:\\Program Files\\Microsoft Visual Studio\\2022\\Enterprise\\VC\\Auxiliary\\Build\\vcvars64.bat"
+                    "C:\\Program Files\\Microsoft Visual Studio\\2022\\Professional\\VC\\Auxiliary\\Build\\vcvars64.bat",
+                    "C:\\Program Files\\Microsoft Visual Studio\\2022\\Enterprise\\VC\\Auxiliary\\Build\\vcvars64.bat",
+                    "C:\\Program Files\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64.bat",
+                    "C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat",
+                    "C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Professional\\VC\\Auxiliary\\Build\\vcvars64.bat",
+                    "C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Enterprise\\VC\\Auxiliary\\Build\\vcvars64.bat",
+                    "C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64.bat"
                 };
+                
                 for (const char* p : searchPaths) {
                     if (GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES) {
                         vcvars = p;
                         break;
                     }
                 }
-                if (!vcvars.empty()) bat << "call \"" << vcvars << "\"\n";
+                
+                if (!vcvars.empty()) {
+                    bat << "call \"" << vcvars << "\" >nul 2>&1\n"; // Hide the massive VS splash output
+                }
             }
 
             bat << command << "\n";
             bat.close();
 
+            // Execute the bat file and pipe output
             std::string fullCmd = "cmd.exe /c \"\"" + batPath + "\" > \"" + outPath + "\" 2>&1\"";
             system(fullCmd.c_str());
+            
+            // Cleanup
             DeleteFileA(batPath.c_str());
         }
+        
         PostMessageW(hMainWnd, WM_EXEC_DONE, 0, 0);
     }).detach();
 }
@@ -2415,3 +2469,4 @@ int WINAPI WinMain(HINSTANCE hI, HINSTANCE, LPSTR, int) {
     while (GetMessageW(&msg, 0, 0, 0)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
     return (int)msg.wParam;
 }
+
