@@ -33,7 +33,9 @@
 
 #include <windows.h>
 #include <wininet.h>
+#ifndef NOVA_DISABLE_SAPI
 #include <sapi.h>
+#endif
 #include <string>
 #include <algorithm>
 #include <thread>
@@ -70,7 +72,9 @@ using std::max;
 #pragma comment(lib, "winmm.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "shlwapi.lib")
+#ifndef NOVA_DISABLE_SAPI
 #pragma comment(lib, "sapi.lib")
+#endif
 #pragma comment(lib, "advapi32.lib")
 
 #pragma comment(linker,"\"/manifestdependency:type='win32' \
@@ -248,7 +252,7 @@ struct ChatRequest {
 // ══════════════════════════════════════════════════════════════════
 // THREAD-SAFE APP STATE MANAGEMENT & PLUGIN ENGINE
 // ══════════════════════════════════════════════════════════════════
-void DevLog(const char* fmt, ...);
+static void DevLog(const char* fmt, ...);
 std::string DecodeJsonString(const std::string& json, const std::string& key);
 
 struct HModuleDeleter {
@@ -377,7 +381,9 @@ std::wstring      conversationHistory;
 std::atomic<bool> g_muted(false);
 bool              consoleAllocated = false;
 
+#ifndef NOVA_DISABLE_SAPI
 ISpVoice* g_pVoice = nullptr;
+#endif
 std::mutex g_voiceMutex;
 
 const size_t      MAX_HISTORY_CHARS = 8000;
@@ -396,13 +402,14 @@ PROCESS_INFORMATION g_serverPi = {};
 // ════════════════════════════════════════════════════════════════
 std::string GetExeDir();
 std::string GetDesktopDir();
+std::string GetEnvVar(const char* name, const char* fallback);
 std::string PrecisionEscape(const std::string& s);
 std::string DecodeJsonString(const std::string& json, const std::string& key);
 std::string WStringToString(const std::wstring& w);
 std::wstring StringToWString(const std::string& s);
 std::string UrlEncode(const std::string& s);
 std::string Base64Encode(const std::vector<BYTE>& data);
-std::string ExtractReply(const std::string& raw, ProtocolType proto);
+static std::string ExtractReply(const std::string& raw, ProtocolType proto);
 
 void SaveConfig();
 void LoadConfig();
@@ -565,6 +572,16 @@ std::string GetExeDir() {
     size_t last = ws.find_last_of(L"\\/");
     std::wstring dir = (last != std::wstring::npos) ? ws.substr(0, last + 1) : L"";
     return WStringToString(dir);
+}
+
+std::string GetEnvVar(const char* name, const char* fallback) {
+    DWORD needed = GetEnvironmentVariableA(name, nullptr, 0);
+    if (needed == 0) return fallback;
+    std::string value(needed, '\0');
+    DWORD written = GetEnvironmentVariableA(name, &value[0], needed);
+    if (written == 0) return fallback;
+    value.resize(written);
+    return value;
 }
 
 std::string IndexProjectDirectory(const std::string& targetPath) {
@@ -862,7 +879,7 @@ std::string AnalyzeImageGDIPlus(const std::wstring& path) {
 }
 
 std::string AnalyzeWavDetailed(const std::wstring& path) {
-    std::ifstream f(path, std::ios::binary);
+    std::ifstream f(path.c_str(), std::ios::binary);
     if (!f) return "ERROR: Could not open WAV file.";
 
     char riff[4]; f.read(riff, 4);
@@ -1000,7 +1017,7 @@ bool LoadAttachment(const std::wstring& path, Attachment& out) {
         "css","md","log","csv","ini","yaml","yml","bat","ps1","sh","rc","asm"
     };
     if (std::find(textExts.begin(), textExts.end(), ext) != textExts.end()) {
-        std::ifstream f(path, std::ios::binary);
+        std::ifstream f(path.c_str(), std::ios::binary);
         if (!f) return false;
         std::ostringstream ss; ss << f.rdbuf();
         std::string raw = ss.str();
@@ -1371,8 +1388,10 @@ std::string AnalyzeAndFetch(const std::string& lower, const std::string& orig) {
 // ════════════════════════════════════════════════════════════════
 void SpeakAsync(const std::wstring& text) {
     if (g_muted || text.empty()) return;
+#ifndef NOVA_DISABLE_SAPI
     std::lock_guard<std::mutex> lk(g_voiceMutex);
     if (g_pVoice) g_pVoice->Speak(text.c_str(), SPF_ASYNC | SPF_PURGEBEFORESPEAK, nullptr);
+#endif
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -1669,11 +1688,7 @@ void AIThreadFunc(std::wstring userMsg, std::string webInfo, bool hasAttach, Att
     DevLog("[AI] Thread started — provider: %S\n", g_providerPresets[AppStateManager::Instance().config.provider].displayName);
 
     // 1. Dynamically get paths for Universal Release
-    char* userProfilePath = nullptr;
-    size_t len = 0;
-    _dupenv_s(&userProfilePath, &len, "USERPROFILE");
-    std::string uniProfile = userProfilePath ? userProfilePath : "C:\\";
-    if (userProfilePath) free(userProfilePath);
+    std::string uniProfile = GetEnvVar("USERPROFILE", "C:\\");
 
     // Get the desktop using your existing GetDesktopDir() helper
     std::string uniDesktop = GetDesktopDir(); 
@@ -2216,7 +2231,9 @@ LRESULT CALLBACK WindowProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 
         case IDC_BTN_MUTE:
             g_muted = !g_muted;
+#ifndef NOVA_DISABLE_SAPI
             if (g_muted) { std::lock_guard<std::mutex> lk(g_voiceMutex); if (g_pVoice) g_pVoice->Speak(L"", SPF_ASYNC | SPF_PURGEBEFORESPEAK, nullptr); }
+#endif
             SetWindowTextW(hButtonMute, g_muted ? L"Unmute" : L"Mute"); break;
 
         case IDC_BTN_DEV:
@@ -2333,10 +2350,12 @@ LRESULT CALLBACK WindowProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         DeleteObject(hFontMain); 
         DeleteObject(hFontBtn); 
         DeleteObject(hFontIndicator);
+#ifndef NOVA_DISABLE_SAPI
         { 
             std::lock_guard<std::mutex> lk(g_voiceMutex); 
             if (g_pVoice) { g_pVoice->Release(); g_pVoice = nullptr; } 
         }
+#endif
         CoUninitialize();
         PostQuitMessage(0);
         return 0;
@@ -2352,6 +2371,7 @@ LRESULT CALLBACK WindowProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 int WINAPI WinMain(HINSTANCE hI, HINSTANCE, LPSTR, int) {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     
+#ifndef NOVA_DISABLE_SAPI
     // TTS Setup — Female American Voice (Zira)
     if (SUCCEEDED(CoCreateInstance(CLSID_SpVoice, nullptr, CLSCTX_ALL, IID_ISpVoice, (void**)&g_pVoice))) {
 	g_pVoice->SetRate(4);
@@ -2374,6 +2394,7 @@ int WINAPI WinMain(HINSTANCE hI, HINSTANCE, LPSTR, int) {
         g_pVoice->SetVolume(100);
         g_pVoice->SetRate(-1); 
     }
+#endif
 
     Gdiplus::GdiplusStartupInput gdipInput;
     Gdiplus::GdiplusStartup(&g_gdipToken, &gdipInput, NULL);
@@ -2462,7 +2483,11 @@ int WINAPI WinMain(HINSTANCE hI, HINSTANCE, LPSTR, int) {
     DevLog("SSL        : %s\n", g_config.useSSL ? "yes" : "no");
     DevLog("Exe dir    : %s\n", GetExeDir().c_str());
     DevLog("History    : %zu chars\n", conversationHistory.size());
+#ifndef NOVA_DISABLE_SAPI
     DevLog("TTS Voice  : %s\n", g_pVoice ? "Ready" : "NOT INITIALIZED");
+#else
+    DevLog("TTS Voice  : disabled for this build\n");
+#endif
     DevLog("==================================\n");
 
     MSG msg;

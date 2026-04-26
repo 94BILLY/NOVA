@@ -31,6 +31,10 @@ This release follows a strictly sequenced process. Choose your path:
 3. **`Step 3 - Run_Nova.bat`** — Launches Nova.  
 4. **`Step 4 - Create_Shortcut.bat`** — Creates the desktop shortcut (optional).
 
+**Option C — Linux / Wine Development Setup**  
+1. **`install_nova_linux.sh`** — Installs Wine/MinGW dependencies, builds `Nova.exe` with SAPI disabled for Wine compatibility, and writes a local launcher/config.  
+2. **`run_nova_linux.sh`** — Launches the Wine build using `NOVA_WINEPREFIX` or `~/.nova-wine`.
+
 #### 🔒 Privacy & Sovereignty
 
 Nova operates with **Total Data Sovereignty**. No telemetry, no cloud logging, and no external guardrails. Your intelligence remains entirely on your hardware.
