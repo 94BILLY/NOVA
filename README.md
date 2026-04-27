@@ -1,12 +1,17 @@
 # NOVA v1.5 🌎
-### The Executive Desktop Assistant
+### Native Windows AI Operator
 *"The performance & durability of the past with the intelligence of the future."*
 
-This is the official **v1.5** release of Nova, a high-performance, bare-metal desktop orchestrator built in native Win32 C++17—utilizing the same architecture that powered the most legendary applications of the Windows XP era. Engineered for zero-bloat execution, Nova eliminates the massive overhead of modern web wrappers to reserve 100% of system resources for local intelligence and hardware-accelerated performance.
+Nova is a native Win32 C++17 desktop assistant that can chat with local or cloud AI providers and execute approved Windows tasks through PowerShell/CMD. It is built for users who want a fast, local-first AI operator without an Electron wrapper.
 
-Nova features a unified 17-provider AI backend, a custom EXEC engine for automated Windows task management, deep multimodal attachment analysis, real-time internet access, and the proprietary **EvolvingPersonality®** system that grows with you entirely on-device.
+What Nova does today:
+* Connects to 17 local and cloud AI backends.
+* Automates Windows tasks through the `EXEC:` command pipeline.
+* Reads image, audio, video metadata, and source/text attachments.
+* Keeps local history and personality data on your machine.
+* Runs as a small native Windows executable.
 
-Due to the strong popularity of v1.0.0 (over **400+ clones** since its initial release), I'm shipping v1.5 with significant stability and usability upgrades while staying true to the original bare-metal philosophy.
+Try these first: see [`recipes/demo-recipes.md`](recipes/demo-recipes.md) for five safe demo prompts that show folder creation, file summarization, C++ app generation, weather/news lookup, and provider switching.
 
 #### 🚀 Key Improvements in v1.5
 
@@ -31,9 +36,11 @@ This release follows a strictly sequenced process. Choose your path:
 3. **`Step 3 - Run_Nova.bat`** — Launches Nova.  
 4. **`Step 4 - Create_Shortcut.bat`** — Creates the desktop shortcut (optional).
 
-#### 🔒 Privacy & Sovereignty
+#### 🔒 Security, Privacy & Control
 
-Nova operates with **Total Data Sovereignty**. No telemetry, no cloud logging, and no external guardrails. Your intelligence remains entirely on your hardware.
+Nova has no telemetry and stores local history/personality data beside the app. API keys are saved in `nova_config.ini`, so treat that file as private. The `EXEC:` pipeline can run real Windows shell commands; review commands before using Nova on sensitive files or systems.
+
+When using local providers, prompts and attachments stay on your machine. When using cloud providers, requests are sent to the selected provider according to that provider's terms.
 
 **Technical Requirement:** Requires Microsoft Visual Studio Build Tools (MSVC) for source compilation (2019 or 2022).
 
