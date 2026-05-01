@@ -48,25 +48,29 @@ Things you can make with Nova 1.5:
 * **EvolvingPersonality®:** Persistent identity and memory growth between sessions, stored entirely on-device.
 
 #### 🛠 Installation (One Step)
-
-NOVA now uses a single installation flow.
-
-1. Download this repository (or `Install_Nova.bat`) to your Windows machine.
+NOVA uses a single installer flow.
+1. Download this repository (or just `Install_Nova.bat`) to your Windows machine.
 2. Double-click **`Install_Nova.bat`**.
 3. The installer automatically:
-   - Downloads the latest `Nova.exe` from GitHub Releases,
-   - Downloads and extracts the local `llama-server` engine,
-   - Downloads the default `llama3.gguf` model (~4.66 GB, resumable),
-   - Creates a desktop shortcut, and
-   - Optionally launches NOVA.
-
+   - downloads the latest `Nova.exe` from GitHub Releases,
+   - downloads and extracts the local `llama-server` engine,
+   - downloads the default `llama3.gguf` model (~4.66 GB, resumable),
+   - creates a desktop shortcut, and
+   - optionally launches NOVA.
 **Requirements**
-- Windows 10 version 1803 or later (built-in `curl`)
+- Windows 10 version 1803 or later
+- `curl` and PowerShell available on system PATH
 - Stable internet connection
 - ~6-8 GB free disk space
-
 **If installation is interrupted**
-- Re-run `Install_Nova.bat`; existing files are reused and model download resumes.
+- Re-run `Install_Nova.bat`; existing files are reused and the model download resumes.
+**If you need a clean re-download**
+- Delete `Nova.exe` and run `Install_Nova.bat` again.
+#### 🔧 Manual Source Build (Advanced)
+If you want to build from source instead of using the prebuilt release binary:
+1. Install Microsoft Visual Studio Build Tools (MSVC 2019 or 2022).
+2. Build `nova.cpp` into `Nova.exe` with your preferred MSVC workflow.
+3. Run `Nova.exe` from the project directory.
 
 #### 🔒 Security, Privacy & Control
 
