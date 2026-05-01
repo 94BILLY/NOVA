@@ -47,18 +47,26 @@ Things you can make with Nova 1.5:
 * **Multimodal Attachment Analysis:** Native GDI+ image analysis, WAV audio parsing, video metadata via ffprobe, and full source file ingestion.
 * **EvolvingPersonality®:** Persistent identity and memory growth between sessions, stored entirely on-device.
 
-#### 🛠 Installation Details
+#### 🛠 Installation (One Step)
 
-This release follows a strictly sequenced process. Choose your path:
+NOVA now uses a single installation flow.
 
-**Option A — Pre-built Binary (Recommended)**  
-1. Download and run **`Install_Nova.bat`** — it handles everything (engine + model + shortcut).
+1. Download this repository (or `Install_Nova.bat`) to your Windows machine.
+2. Double-click **`Install_Nova.bat`**.
+3. The installer automatically:
+   - Downloads the latest `Nova.exe` from GitHub Releases,
+   - Downloads and extracts the local `llama-server` engine,
+   - Downloads the default `llama3.gguf` model (~4.66 GB, resumable),
+   - Creates a desktop shortcut, and
+   - Optionally launches NOVA.
 
-**Option B — Build from Source**  
-1. **`Step 1 - Setup_Nova.bat`** — Downloads the local engine and model weights (~4.66 GB).  
-2. **`Step 2 - Compile_Nova.bat`** — Locates MSVC (auto-detects VS2019/VS2022) and compiles `nova.cpp` into `Nova.exe`.  
-3. **`Step 3 - Run_Nova.bat`** — Launches Nova.  
-4. **`Step 4 - Create_Shortcut.bat`** — Creates the desktop shortcut (optional).
+**Requirements**
+- Windows 10 version 1803 or later (built-in `curl`)
+- Stable internet connection
+- ~6-8 GB free disk space
+
+**If installation is interrupted**
+- Re-run `Install_Nova.bat`; existing files are reused and model download resumes.
 
 #### 🔒 Security, Privacy & Control
 
@@ -66,7 +74,8 @@ Nova has no telemetry and stores local history/personality data beside the app. 
 
 When using local providers, prompts and attachments stay on your machine. When using cloud providers, requests are sent to the selected provider according to that provider's terms.
 
-**Technical Requirement:** Requires Microsoft Visual Studio Build Tools (MSVC) for source compilation (2019 or 2022).
+**Technical Requirement:** No compiler is required for the standard install flow.  
+For manual source compilation, use Microsoft Visual Studio Build Tools (MSVC, 2019 or 2022).
 
 ---
 
