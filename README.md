@@ -13,6 +13,30 @@ What Nova does today:
 
 Try these first: see [`recipes/demo-recipes.md`](recipes/demo-recipes.md) for five safe demo prompts that show folder creation, file summarization, C++ app generation, weather/news lookup, and provider switching.
 
+#### ✨ What You Can Do With Nova 1.5
+
+Use prompts like these to test Nova's core Windows-operator loop:
+
+* "Create a folder on my Desktop called `NovaDemo` and add a `README.txt` explaining what Nova did."
+* "Organize my Desktop into folders for images, documents, installers, and code."
+* "Create a tiny C++ console app that prints `Hello from Nova`, compile it with MSVC, and tell me where the EXE is."
+* "Make a simple Win32 C++ window with a button that says `Click me`."
+* "Use Ollama as my provider and help me test whether it is responding."
+* "Summarize this attached text or source file without sending it to the cloud."
+* "Check today's weather or latest news and give me a three-bullet summary."
+* "Update your personality based on how I corrected you."
+
+Things you can make with Nova 1.5:
+
+* Small C++ utilities and Win32 app prototypes.
+* Batch scripts for repetitive Windows tasks.
+* PowerShell file organization tools.
+* Desktop project scaffolds.
+* README, checklist, and project-plan generators.
+* Local document and source-code summaries.
+* Provider test and debug workflows.
+* Personal knowledge notes and reusable task recipes.
+
 #### 🚀 Key Improvements in v1.5
 
 * **Bare-Metal Core:** 100% Native C++ execution with zero bloat, native DPI Awareness for crisp 4K displays, and a sleek centered 600px 7-button dashboard layout.
