@@ -1,7 +1,9 @@
 @echo off
-title NOVA v1.5 — Bootstrap Installer
+setlocal EnableExtensions
+title NOVA v1.5 - Bootstrap Installer
 color 0F
 cd /d "%~dp0"
+
 echo.
 echo  ============================================================
 echo    NOVA v1.5  --  Bootstrap Installer
@@ -9,148 +11,134 @@ echo    github.com/94BILLY/NOVA
 echo  ============================================================
 echo.
 
-:: ── Verify curl is available (Windows 10 1803+ has it built-in) ──
-where curl >nul 2>&1
-if %ERRORLEVEL% NEQ 0 (
-    echo  [ERROR] curl not found. Please update Windows 10 to version 1803 or later.
-    pause
-    exit /b 1
-)
+set "NOVA_URL=https://github.com/94BILLY/NOVA/releases/latest/download/Nova.exe"
+set "ENGINE_URL=https://github.com/ggerganov/llama.cpp/releases/download/b4610/llama-b4610-bin-win-vulkan-x64.zip"
+set "MODEL_URL=https://huggingface.co/QuantFactory/Meta-Llama-3-8B-Instruct-GGUF/resolve/main/Meta-Llama-3-8B-Instruct.Q4_K_M.gguf"
 
-:: ── Create directories ──
-if not exist "engine" mkdir engine
-if not exist "models" mkdir models
+set "NOVA_EXE=Nova.exe"
+set "ENGINE_DIR=engine"
+set "MODEL_DIR=models"
+set "ENGINE_ZIP=engine_temp.zip"
+set "ENGINE_TMP=engine_temp"
+set "MODEL_FILE=models\llama3.gguf"
 
-:: ── Step 1: Download Nova.exe from latest GitHub release ──
-if exist "Nova.exe" (
-    echo  [OK] Nova.exe already present — skipping download.
-    echo       To re-download, delete Nova.exe and run this script again.
+set "NOVA_MIN_BYTES=100000"
+set "ENGINE_ZIP_MIN_BYTES=1000000"
+set "MODEL_MIN_BYTES=1000000"
+
+set "SHORTCUT_PATH=%USERPROFILE%\Desktop\Nova.lnk"
+set "TARGET_PATH=%~dp0Nova.exe"
+set "ICON_PATH=%~dp0Nova.exe"
+
+call :require_tool curl "curl not found. Windows 10 1803+ required."
+if errorlevel 1 goto :fail
+
+call :require_tool powershell "PowerShell not found. Required for ZIP extraction and shortcut creation."
+if errorlevel 1 goto :fail
+
+if not exist "%ENGINE_DIR%" mkdir "%ENGINE_DIR%"
+if not exist "%MODEL_DIR%" mkdir "%MODEL_DIR%"
+
+echo  [1/3] Ensuring Nova.exe...
+if exist "%NOVA_EXE%" (
+    echo  [OK] Nova.exe already present - skipping download.
 ) else (
-    echo  [1/3] Downloading Nova.exe from GitHub...
-    curl -L --fail --retry 3 --retry-delay 5 ^
-        -o Nova.exe ^
-        "https://github.com/94BILLY/NOVA/releases/latest/download/Nova.exe"
+    call :download_file "%NOVA_URL%" "%NOVA_EXE%" "Nova.exe"
+    if errorlevel 1 goto :fail
 
-    if %ERRORLEVEL% NEQ 0 (
-        echo.
-        echo  [ERROR] Could not download Nova.exe.
-        echo  Check your internet connection or visit:
-        echo  https://github.com/94BILLY/NOVA/releases/latest
-        if exist "Nova.exe" del "Nova.exe"
-        pause
-        exit /b 1
-    )
-
-    for %%A in (Nova.exe) do (
-        if %%~zA LSS 100000 (
-            echo  [ERROR] Nova.exe download is too small — likely an error page.
-            del "Nova.exe"
-            pause
-            exit /b 1
-        )
+    call :check_min_size "%NOVA_EXE%" %NOVA_MIN_BYTES% "Nova.exe download is too small - likely an error page."
+    if errorlevel 1 (
+        del /q "%NOVA_EXE%" >nul 2>&1
+        goto :fail
     )
     echo  [OK] Nova.exe downloaded.
 )
 
-:: ── Step 2: Download llama-server engine ──
-if exist "engine\llama-server.exe" (
+echo  [2/3] Ensuring llama-server engine...
+if exist "%ENGINE_DIR%\llama-server.exe" (
     echo  [OK] llama-server.exe already present.
 ) else (
-    echo  [2/3] Downloading llama-server engine...
+    if exist "%ENGINE_ZIP%" del /q "%ENGINE_ZIP%" >nul 2>&1
+    if exist "%ENGINE_TMP%" rd /s /q "%ENGINE_TMP%" >nul 2>&1
 
-    if exist "engine_temp.zip" del "engine_temp.zip"
-    if exist "engine_temp"     rd /s /q "engine_temp"
+    call :download_file "%ENGINE_URL%" "%ENGINE_ZIP%" "Engine ZIP"
+    if errorlevel 1 goto :fail
 
-    curl -L --fail --retry 3 --retry-delay 5 ^
-        -o engine_temp.zip ^
-        "https://github.com/ggerganov/llama.cpp/releases/download/b4610/llama-b4610-bin-win-vulkan-x64.zip"
-
-    if %ERRORLEVEL% NEQ 0 (
-        echo  [ERROR] Engine download failed. Check your internet connection.
-        if exist "engine_temp.zip" del "engine_temp.zip"
-        pause
-        exit /b 1
-    )
-
-    for %%A in (engine_temp.zip) do (
-        if %%~zA LSS 1000000 (
-            echo  [ERROR] Engine ZIP is too small — likely an error page.
-            del "engine_temp.zip"
-            pause
-            exit /b 1
-        )
+    call :check_min_size "%ENGINE_ZIP%" %ENGINE_ZIP_MIN_BYTES% "Engine ZIP is too small - likely an error page."
+    if errorlevel 1 (
+        del /q "%ENGINE_ZIP%" >nul 2>&1
+        goto :fail
     )
 
     echo  Extracting engine...
-    powershell -Command "Expand-Archive -Path 'engine_temp.zip' -DestinationPath 'engine_temp' -Force"
-
-    for /r "engine_temp" %%f in (llama-server.exe) do move /y "%%f" "engine\" >nul 2>&1
-    for /r "engine_temp" %%f in (*.dll)            do move /y "%%f" "engine\" >nul 2>&1
-
-    if not exist "engine\llama-server.exe" (
-        echo  [ERROR] llama-server.exe not found after extraction.
-        pause
-        exit /b 1
+    powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+      "try { Expand-Archive -Path '%ENGINE_ZIP%' -DestinationPath '%ENGINE_TMP%' -Force; exit 0 } catch { exit 1 }"
+    if errorlevel 1 (
+        echo  [ERROR] Failed to extract engine ZIP.
+        goto :cleanup_engine_fail
     )
 
-    del "engine_temp.zip"
-    rd /s /q "engine_temp"
+    for /r "%ENGINE_TMP%" %%f in (llama-server.exe) do move /y "%%f" "%ENGINE_DIR%\" >nul 2>&1
+    for /r "%ENGINE_TMP%" %%f in (*.dll) do move /y "%%f" "%ENGINE_DIR%\" >nul 2>&1
+
+    if not exist "%ENGINE_DIR%\llama-server.exe" (
+        echo  [ERROR] llama-server.exe not found after extraction.
+        goto :cleanup_engine_fail
+    )
+
+    if exist "%ENGINE_ZIP%" del /q "%ENGINE_ZIP%" >nul 2>&1
+    if exist "%ENGINE_TMP%" rd /s /q "%ENGINE_TMP%" >nul 2>&1
+
     echo  [OK] Engine installed.
 )
 
-:: ── Step 3: Download model ──
-if exist "models\llama3.gguf" (
-    for %%A in (models\llama3.gguf) do (
-        if %%~zA LSS 1000000 (
-            echo  [WARN] llama3.gguf is corrupt — re-downloading...
-            del "models\llama3.gguf"
-            goto :download_model
-        )
+echo  [3/3] Ensuring model...
+if exist "%MODEL_FILE%" (
+    call :check_min_size "%MODEL_FILE%" %MODEL_MIN_BYTES% ""
+    if errorlevel 1 (
+        echo  [WARN] Existing model appears corrupt - re-downloading...
+        del /q "%MODEL_FILE%" >nul 2>&1
+        goto :download_model
     )
     echo  [OK] llama3.gguf already present.
     goto :setup_done
 )
 
 :download_model
-echo  [3/3] Downloading Llama-3 8B Instruct Q4_K_M (~4.66 GB)...
-echo        This will take a while. If interrupted, re-run to resume.
+echo  Downloading Llama-3 8B Instruct Q4_K_M (~4.66 GB)...
+echo  This can take a while. Re-run this script to resume if interrupted.
 echo.
 
-curl -L --fail -C - --retry 5 --retry-delay 10 ^
-    -o "models\llama3.gguf" ^
-    "https://huggingface.co/QuantFactory/Meta-Llama-3-8B-Instruct-GGUF/resolve/main/Meta-Llama-3-8B-Instruct.Q4_K_M.gguf"
-
-if %ERRORLEVEL% NEQ 0 (
+curl -L --fail -C - --retry 5 --retry-delay 10 -o "%MODEL_FILE%" "%MODEL_URL%"
+if errorlevel 1 (
     echo.
     echo  [ERROR] Model download failed or interrupted.
-    echo  Re-run this script to resume the download.
+    echo  Re-run this script to resume.
     echo  Needs ~5 GB free disk space.
-    for %%A in (models\llama3.gguf) do (
-        if %%~zA LSS 1000000 del "models\llama3.gguf"
-    )
-    pause
-    exit /b 1
+    call :check_min_size "%MODEL_FILE%" %MODEL_MIN_BYTES% ""
+    if errorlevel 1 del /q "%MODEL_FILE%" >nul 2>&1
+    goto :fail
 )
 
-for %%A in (models\llama3.gguf) do (
-    if %%~zA LSS 1000000 (
-        echo  [ERROR] Downloaded file is too small — not the model.
-        del "models\llama3.gguf"
-        pause
-        exit /b 1
-    )
+call :check_min_size "%MODEL_FILE%" %MODEL_MIN_BYTES% "Downloaded model is too small - likely invalid."
+if errorlevel 1 (
+    del /q "%MODEL_FILE%" >nul 2>&1
+    goto :fail
 )
+
 echo  [OK] Model downloaded.
 
 :setup_done
-:: ── Create desktop shortcut ──
 echo.
 echo  Creating desktop shortcut...
-set "SHORTCUT_PATH=%USERPROFILE%\Desktop\Nova.lnk"
-set "TARGET_PATH=%~dp0Nova.exe"
-set "ICON_PATH=%~dp0Nova.exe"
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "try { $s=(New-Object -COM WScript.Shell).CreateShortcut('%SHORTCUT_PATH%'); $s.TargetPath='%TARGET_PATH%'; $s.IconLocation='%ICON_PATH%,0'; $s.WorkingDirectory='%~dp0'; $s.WindowStyle=1; $s.Save(); exit 0 } catch { exit 1 }"
 
-powershell -Command "$s=(New-Object -COM WScript.Shell).CreateShortcut('%SHORTCUT_PATH%'); $s.TargetPath='%TARGET_PATH%'; $s.IconLocation='%ICON_PATH%,0'; $s.WorkingDirectory='%~dp0'; $s.WindowStyle=1; $s.Save()"
+if errorlevel 1 (
+    echo  [WARN] Could not create desktop shortcut. You can still run Nova.exe directly.
+) else (
+    echo  [OK] Desktop shortcut created.
+)
 
 echo.
 echo  ============================================================
@@ -160,7 +148,44 @@ echo.
 echo  Launch now or use the Nova shortcut on your Desktop.
 echo.
 choice /C YN /M "Launch Nova now?"
-if %ERRORLEVEL% EQU 1 (
-    start "" "%~dp0Nova.exe"
+if %ERRORLEVEL% EQU 1 start "" "%~dp0Nova.exe"
+
+exit /b 0
+
+:cleanup_engine_fail
+if exist "%ENGINE_ZIP%" del /q "%ENGINE_ZIP%" >nul 2>&1
+if exist "%ENGINE_TMP%" rd /s /q "%ENGINE_TMP%" >nul 2>&1
+goto :fail
+
+:require_tool
+where %~1 >nul 2>&1
+if errorlevel 1 (
+    echo  [ERROR] %~2
+    exit /b 1
 )
-exit
+exit /b 0
+
+:download_file
+echo  Downloading %~3...
+curl -L --fail --retry 3 --retry-delay 5 -o "%~2" "%~1"
+if errorlevel 1 (
+    echo  [ERROR] Failed to download %~3.
+    exit /b 1
+)
+exit /b 0
+
+:check_min_size
+if not exist "%~1" exit /b 1
+for %%A in ("%~1") do set "FILE_SIZE=%%~zA"
+if "%FILE_SIZE%"=="" exit /b 1
+if %FILE_SIZE% LSS %~2 (
+    if not "%~3"=="" echo  [ERROR] %~3
+    exit /b 1
+)
+exit /b 0
+
+:fail
+echo.
+echo  Installation did not complete successfully.
+pause
+exit /b 1
