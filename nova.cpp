@@ -93,7 +93,7 @@ static void EnableDPIAwareness() {
 // ════════════════════════════════════════════════════════════════
 // CONSTANTS & CONTROL IDS
 // ════════════════════════════════════════════════════════════════
-static constexpr const wchar_t* NOVA_VERSION = L"1.0.1";
+static constexpr const wchar_t* NOVA_VERSION = L"1.5.0";
 
 #define IDT_PULSE       1002
 #define PULSE_INTERVAL  40
