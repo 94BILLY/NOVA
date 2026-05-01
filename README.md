@@ -1,5 +1,5 @@
 # NOVA v1.5 🌎
-### Native Windows AI Operator
+### Native Windows Executive Assistant
 *"The performance & durability of the past with the intelligence of the future."*
 
 Nova is a native Win32 C++17 desktop assistant that can chat with local or cloud AI providers and execute approved Windows tasks through PowerShell/CMD. It is built for users who want a fast, local-first AI operator without an Electron wrapper.
