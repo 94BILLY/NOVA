@@ -1333,7 +1333,10 @@ std::string FetchNews(const std::string&) {
         p = rss.find("<title>", p); if (p == std::string::npos) break; p += 7;
         size_t e = rss.find("</title>", p); if (e == std::string::npos) break;
         std::string t = rss.substr(p, e - p);
-        if (t.find("BBC") == std::string::npos) { h += "* " + t + "\n"; c++; }
+        // Strip CDATA wrapper
+        if (t.rfind("<![CDATA[", 0) == 0) t = t.substr(9);
+        if (t.size() >= 3 && t.substr(t.size() - 3) == "]]>") t = t.substr(0, t.size() - 3);
+        if (t.find("BBC") == std::string::npos && !t.empty()) { h += "* " + t + "\n"; c++; }
         p = e + 1;
     }
     return h;
@@ -1701,7 +1704,7 @@ void AIThreadFunc(std::wstring userMsg, std::string webInfo, bool hasAttach, Att
     sys += "\n=== CAPABILITIES ===\n";
     sys += "- ATTACH: File content analysis.\n";
     sys += "- SPEECH: Responses read via SAPI TTS.\n";
-    sys += "- INTERNET: For weather, news, and Wikipedia queries the system pre-fetches real data and injects it as 'Context:' at the bottom of this prompt. When Context is present, summarize it directly. NEVER use EXEC: for internet lookups — the data is already there.\n";
+    sys += "- INTERNET: For weather, news, and Wikipedia queries the system pre-fetches real data and injects it as 'Context:' at the bottom of this prompt. When Context is present, respond naturally using that information — DO NOT output the word 'Context:' or the raw bullet list. Just talk about it like you already know it. NEVER use EXEC: for internet lookups — the data is already there.\n";
     
     sys += "\n=== CONSTRAINTS ===\n";
     sys += "Always use absolute paths starting with " + uniProfile + "\\\n";
