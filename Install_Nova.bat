@@ -1,12 +1,12 @@
 @echo off
 setlocal EnableExtensions
-title NOVA v1.5 - Bootstrap Installer
+title NOVA v1.5.1 - Bootstrap Installer
 color 0F
 cd /d "%~dp0"
 
 echo.
 echo  ============================================================
-echo    NOVA v1.5  --  Bootstrap Installer
+echo    NOVA v1.5.1  --  Bootstrap Installer
 echo    github.com/94BILLY/NOVA
 echo  ============================================================
 echo.
@@ -28,7 +28,7 @@ set "MODEL_MIN_BYTES=1000000"
 
 set "SHORTCUT_PATH=%USERPROFILE%\Desktop\Nova.lnk"
 set "TARGET_PATH=%~dp0Nova.exe"
-set "ICON_PATH=%~dp0Nova.exe"
+set "ICON_PATH=%~dp0Nova.ico"
 
 call :require_tool curl "curl not found. Windows 10 1803+ required."
 if errorlevel 1 goto :fail
@@ -142,7 +142,7 @@ if errorlevel 1 (
 
 echo.
 echo  ============================================================
-echo    NOVA v1.5 IS READY
+echo    NOVA v1.5.1 IS READY
 echo  ============================================================
 echo.
 echo  Launch now or use the Nova shortcut on your Desktop.

@@ -21,8 +21,9 @@ engine/
 models/
 
 # User-Specific Data
-# Keep the user's local history and custom personality private.
 nova_history.txt
+nova_config.ini
+nova_dev_log.txt
 # Optional: Uncomment below if you want users to start with a fresh personality file
 # nova_personality.txt
 
