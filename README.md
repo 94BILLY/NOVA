@@ -60,7 +60,7 @@ Try these first: see [`recipes/demo-recipes.md`](recipes/demo-recipes.md) for fi
 
 ---
 
-## Installation (One Step)
+## Installation
 
 1. Download this repository (or just `Install_Nova.bat`) to your Windows machine.
 2. Double-click **`Install_Nova.bat`**.
