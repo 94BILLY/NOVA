@@ -4,6 +4,13 @@
 
 Nova is a native Win32 C++17 desktop assistant that connects to local or cloud AI providers and can automate real Windows tasks through PowerShell/CMD. No Electron. No bloat. No bullsh*t.
 
+---
+
+> **Nova Pro** — Dark mode, Dev Mode, and local image generation. Lifetime license, $19 founding member price.
+> **[Get Nova Pro on Gumroad →](https://94billy.gumroad.com/l/NOVA)**
+
+---
+
 **What Nova does:**
 * Connects to 17 local and cloud AI backends
 * Automates Windows tasks through the `EXEC:` command pipeline
