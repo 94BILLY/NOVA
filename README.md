@@ -1,5 +1,5 @@
-# NOVA v1.5.1 🌎
-### Native Windows Desktop Assistant
+# Announcing Nova v1.5.1 & Nova Pro 🌎
+### The Executive Desktop Assistant
 *"The performance & durability of the past with the intelligence of the future."*
 
 Nova is a native Win32 C++17 desktop assistant that connects to local or cloud AI providers and can automate real Windows tasks through PowerShell/CMD. No Electron. No bloat. No bullsh*t.
