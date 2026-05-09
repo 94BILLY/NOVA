@@ -1,21 +1,21 @@
-# NOVA v1.5 🌎
-### Native Windows Executive Assistant
+# NOVA v1.5.1 🌎
+### Native Windows Desktop Assistant
 *"The performance & durability of the past with the intelligence of the future."*
 
-Nova is a native Win32 C++17 desktop assistant that can chat with local or cloud AI providers and execute approved Windows tasks through PowerShell/CMD. It is built for users who want a fast, local-first AI operator without an Electron wrapper.
+Nova is a native Win32 C++17 desktop assistant that connects to local or cloud AI providers and can automate real Windows tasks through PowerShell/CMD. No Electron. No bloat. No bullsh*t.
 
-What Nova does today:
-* Connects to 17 local and cloud AI backends.
-* Automates Windows tasks through the `EXEC:` command pipeline.
-* Reads image, audio, video metadata, and source/text attachments.
-* Keeps local history and personality data on your machine.
-* Runs as a small native Windows executable.
+**What Nova does:**
+* Connects to 17 local and cloud AI backends
+* Automates Windows tasks through the `EXEC:` command pipeline
+* Reads image, audio, video metadata, and source/text attachments
+* Keeps local history and personality data on your machine
+* Runs as a small native Windows executable (~3MB, ~14MB heap)
 
-Try these first: see [`recipes/demo-recipes.md`](recipes/demo-recipes.md) for five safe demo prompts that show folder creation, file summarization, C++ app generation, weather/news lookup, and provider switching.
+Try these first: see [`recipes/demo-recipes.md`](recipes/demo-recipes.md) for five safe demo prompts.
 
-#### ✨ What You Can Do With Nova 1.5
+---
 
-Use prompts like these to test Nova's core Windows-operator loop:
+## What You Can Do With Nova 1.5.1
 
 * "Create a folder on my Desktop called `NovaDemo` and add a `README.txt` explaining what Nova did."
 * "Organize my Desktop into folders for images, documents, installers, and code."
@@ -26,64 +26,85 @@ Use prompts like these to test Nova's core Windows-operator loop:
 * "Check today's weather or latest news and give me a three-bullet summary."
 * "Update your personality based on how I corrected you."
 
-Things you can make with Nova 1.5:
+**Things you can make with Nova:**
+* Small C++ utilities and Win32 app prototypes
+* Batch scripts for repetitive Windows tasks
+* PowerShell file organization tools
+* Desktop project scaffolds
+* README, checklist, and project-plan generators
+* Local document and source-code summaries
+* Provider test and debug workflows
+* Personal knowledge notes and reusable task recipes
 
-* Small C++ utilities and Win32 app prototypes.
-* Batch scripts for repetitive Windows tasks.
-* PowerShell file organization tools.
-* Desktop project scaffolds.
-* README, checklist, and project-plan generators.
-* Local document and source-code summaries.
-* Provider test and debug workflows.
-* Personal knowledge notes and reusable task recipes.
+---
 
-#### 🚀 Key Improvements in v1.5
+## Key Improvements in v1.5.1
 
-* **Bare-Metal Core:** 100% Native C++ execution with zero bloat, native DPI Awareness for crisp 4K displays, and a sleek centered 600px 7-button dashboard layout.
-* **Unified 17-Provider Backend:** Seamless switching between local (llama-server, Ollama, LM Studio, vLLM, KoboldCpp, Jan, GPT4All) and cloud endpoints (OpenAI, Anthropic, Groq, Mistral, Together AI, OpenRouter, xAI, Google Gemini, and custom).
-* **Hardware Kill-Switch:** Dedicated **Stop** button with thread-safe inference termination to safely abort execution loops.
-* **Automated Orchestration:** Custom EXEC engine with single-line command chaining and strict anti-hallucination safeguards for PowerShell/CMD task management.
-* **Universal Pathing:** Native support for `%USERPROFILE%` environment variables for reliable cross-machine execution.
-* **Multimodal Attachment Analysis:** Native GDI+ image analysis, WAV audio parsing, video metadata via ffprobe, and full source file ingestion.
+* **Real responses. Casual tone.** Nova talks like a person, not a status report.
+* **EXEC confirmation.** Destructive commands require explicit user approval.
+* **Auto-loop fixed.** Nova no longer self-executes without user input.
+* **Bare-Metal Core:** Pure C++17, zero dependencies, no Qt, no web views.
+* **Unified 17-Provider Backend:** llama-server, Ollama, LM Studio, vLLM, KoboldCpp, Jan, GPT4All, OpenAI, Anthropic, Groq, Mistral, Together AI, OpenRouter, xAI, Google Gemini, and custom.
+* **Hardware Kill-Switch:** Thread-safe Stop button for immediate inference termination.
+* **Automated Orchestration:** EXEC engine with single-line command chaining (`&&`).
+* **Universal Pathing:** `%USERPROFILE%` environment variable support.
+* **Multimodal Attachment Analysis:** GDI+ image analysis, WAV audio, video metadata, source file ingestion.
 * **EvolvingPersonality®:** Persistent identity and memory growth between sessions, stored entirely on-device.
 
-#### 🛠 Installation (One Step)
-NOVA uses a single installer flow.
+---
+
+## Installation (One Step)
+
 1. Download this repository (or just `Install_Nova.bat`) to your Windows machine.
 2. Double-click **`Install_Nova.bat`**.
 3. The installer automatically:
    - downloads the latest `Nova.exe` from GitHub Releases,
    - downloads and extracts the local `llama-server` engine,
    - downloads the default `llama3.gguf` model (~4.66 GB, resumable),
-   - creates a desktop shortcut, and
-   - optionally launches NOVA.
+   - creates a desktop shortcut.
+
 **Requirements**
 - Windows 10 version 1803 or later
 - `curl` and PowerShell available on system PATH
 - Stable internet connection
 - ~6-8 GB free disk space
-**If installation is interrupted**
-- Re-run `Install_Nova.bat`; existing files are reused and the model download resumes.
-**If you need a clean re-download**
-- Delete `Nova.exe` and run `Install_Nova.bat` again.
-#### 🔧 Manual Source Build (Advanced)
-If you want to build from source instead of using the prebuilt release binary:
-1. Install Microsoft Visual Studio Build Tools (MSVC 2019 or 2022).
-2. Build `nova.cpp` into `Nova.exe` with your preferred MSVC workflow.
-3. Run `Nova.exe` from the project directory.
 
-#### 🔒 Security, Privacy & Control
+**If installation is interrupted** — Re-run `Install_Nova.bat`; existing files are reused and the model download resumes.
 
-Nova has no telemetry and stores local history/personality data beside the app. API keys are saved in `nova_config.ini`, so treat that file as private. The `EXEC:` pipeline can run real Windows shell commands; review commands before using Nova on sensitive files or systems.
-
-When using local providers, prompts and attachments stay on your machine. When using cloud providers, requests are sent to the selected provider according to that provider's terms.
-
-**Technical Requirement:** No compiler is required for the standard install flow.  
-For manual source compilation, use Microsoft Visual Studio Build Tools (MSVC, 2019 or 2022).
+**If you need a clean re-download** — Delete `Nova.exe` and run `Install_Nova.bat` again.
 
 ---
 
-**Official Repository:** https://github.com/94BILLY/NOVA  
-**Author:** [94BILLY](https://github.com/94BILLY)
+## Manual Source Build (Advanced)
+
+1. Install Microsoft Visual Studio Build Tools (MSVC 2019 or 2022).
+2. Build `nova.cpp` into `Nova.exe` using `Step_2_Compile_Nova.bat`.
+3. Run `Nova.exe` from the project directory.
+
+---
+
+## Nova Pro
+
+Nova Pro is the paid tier — a lifetime license with dark mode, Dev Mode, image generation via local Stable Diffusion, and a native installer.
+
+**[Get Nova Pro → 94billy.gumroad.com/l/NOVA](https://94billy.gumroad.com/l/NOVA)**
+
+---
+
+## Security, Privacy & Control
+
+Nova has no telemetry. API keys are saved in `nova_config.ini` — treat it as private. The `EXEC:` pipeline can run real Windows shell commands; review commands before using Nova on sensitive files or systems. Local providers keep all data on your machine. Cloud providers send requests per their own terms.
+
+---
+
+<div align="center">
+
+[github.com/94BILLY/NOVA](https://github.com/94BILLY/NOVA) · [94billy.com/NOVA](https://www.94billy.com/NOVA)
+
+**94BILLY**
 
 *"Anything is possible."*
+
+© 2026 94BILLY · All rights reserved
+
+</div>

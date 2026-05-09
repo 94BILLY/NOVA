@@ -1498,9 +1498,9 @@ static std::string BuildRequestBody(const std::string& sysPrompt, const std::str
 
         std::string fewShot =
             "<|start_header_id|>user<|end_header_id|>\n\ncreate a new folder on the desktop<|eot_id|>"
-            "<|start_header_id|>assistant<|end_header_id|>\n\nEXEC: mkdir C:\\Users\\Public\\Desktop\\NewNovaFolder<|eot_id|>"
+            "<|start_header_id|>assistant<|end_header_id|>\n\nEXEC: cmd /c mkdir \"%USERPROFILE%\\Desktop\\NewNovaFolder\"<|eot_id|>"
             "<|start_header_id|>user<|end_header_id|>\n\nthanks!<|eot_id|>"
-            "<|start_header_id|>assistant<|end_header_id|>\n\nYou're welcome. Ready for the next task.<|eot_id|>";
+            "<|start_header_id|>assistant<|end_header_id|>\n\ndone.<|eot_id|>";
 
         std::string fullPrompt = "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n"
                                + sysPrompt + "<|eot_id|>"
@@ -1694,18 +1694,19 @@ void AIThreadFunc(std::wstring userMsg, std::string webInfo, bool hasAttach, Att
     // --- ADD THESE 3 LINES ---
     sys += "7. ATOMIC PROTOCOL: You may only issue ONE EXEC: command per message.\n";
     sys += "8. WAIT FOR FEEDBACK: After issuing an EXEC: command, YOU MUST STOP GENERATING TEXT.\n";
-    sys += "9. SELF-CORRECTION: I will reply with [SYSTEM FEEDBACK] showing the hardware output. If you see a compiler error, analyze it, rewrite the code using Set-Content, and re-compile autonomously.\n";
-sys += "10. ANTI-HALLUCINATION: NEVER generate or type the words '[SYSTEM FEEDBACK]'. That is injected by the hardware. You must output your EXEC: command and then IMMEDIATELY STOP generating text so the hardware can respond.\n";
+    sys += "9. NEVER generate or type '[SYSTEM FEEDBACK]' — that is injected by the hardware after execution.\n";
+    sys += "10. FILE CONTENT RULE: When writing text content to a file (especially news, quotes, or multi-line data), NEVER embed the raw text inside a PowerShell -Value '...' string — apostrophes and quotes will break the shell. Instead use a temp variable: $t = @'...content...'@; Set-Content -Path '...' -Value $t. Or write to a .txt file via cmd /c echo with redirection.\n";
     // -------------------------
 
     sys += "\n=== CAPABILITIES ===\n";
     sys += "- ATTACH: File content analysis.\n";
     sys += "- SPEECH: Responses read via SAPI TTS.\n";
-    sys += "- INTERNET: Weather, news, and Wikipedia are fetched automatically.\n";
+    sys += "- INTERNET: For weather, news, and Wikipedia queries the system pre-fetches real data and injects it as 'Context:' at the bottom of this prompt. When Context is present, summarize it directly. NEVER use EXEC: for internet lookups — the data is already there.\n";
     
     sys += "\n=== CONSTRAINTS ===\n";
     sys += "Always use absolute paths starting with " + uniProfile + "\\\n";
-    sys += "Be direct. Do not add disclaimers or apologies.\n";
+    sys += "NEVER use C:\\Users\\Public\\Desktop — always use %USERPROFILE%\\Desktop or the Desktop path above.\n";
+    sys += "Be direct. No disclaimers, no apologies, no 'let me know if this works'.\n";
 
     if (!webInfo.empty()) sys += "\n\nContext:\n" + webInfo;
 
@@ -2088,6 +2089,8 @@ void ShowSettingsDialog(HWND parent) {
         wc.style         = CS_HREDRAW | CS_VREDRAW;
         wc.lpfnWndProc   = SettingsWndProc;
         wc.hInstance      = hInst;
+        wc.hIcon          = LoadIconW(hInst, MAKEINTRESOURCEW(1));
+        wc.hIconSm        = LoadIconW(hInst, MAKEINTRESOURCEW(1));
         wc.hCursor        = LoadCursor(nullptr, IDC_ARROW);
         wc.hbrBackground  = (HBRUSH)(COLOR_BTNFACE + 1);
         wc.lpszClassName  = L"NovaSettings";
@@ -2095,9 +2098,13 @@ void ShowSettingsDialog(HWND parent) {
         classRegistered = true;
     }
 
-    hSettingsWnd = CreateWindowExW(WS_EX_TOOLWINDOW, L"NovaSettings", L"Nova Settings",
+    const int SW = 440, SH = 560;
+    RECT pr; GetWindowRect(parent, &pr);
+    int sx = pr.left + (pr.right - pr.left - SW) / 2;
+    int sy = pr.top  + (pr.bottom - pr.top  - SH) / 2;
+    hSettingsWnd = CreateWindowExW(0, L"NovaSettings", L"Nova Settings",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
-        CW_USEDEFAULT, CW_USEDEFAULT, 440, 560, parent, 0, hInst, 0);
+        sx, sy, SW, SH, parent, 0, hInst, 0);
 }
 // ════════════════════════════════════════════════════════════════
 // LAYOUT
@@ -2126,17 +2133,16 @@ void LayoutControls(HWND hwnd) {
     SetWindowPos(hIndicator, 0, 12, 8, W - 24, 30, SWP_NOZORDER);
     SetWindowPos(hEditDisplay, 0, 15, 42, W - 30, DISP_H, SWP_NOZORDER);
 
-    // 7 buttons: 65px each, 8px gap
+    // 6 buttons: 65px each, 8px gap (Dev button removed for public build)
     const int BTN_W = 65, GAP = 8;
-    int totalW = BTN_W * 7 + GAP * 6;
+    int totalW = BTN_W * 6 + GAP * 5;
     int x = (W - totalW) / 2;
     SetWindowPos(hButtonSend,     0, x,                   BTN_Y, BTN_W, BTN_H, SWP_NOZORDER);
     SetWindowPos(hButtonStop,     0, x + (BTN_W + GAP),   BTN_Y, BTN_W, BTN_H, SWP_NOZORDER);
     SetWindowPos(hButtonClear,    0, x + (BTN_W + GAP)*2, BTN_Y, BTN_W, BTN_H, SWP_NOZORDER);
     SetWindowPos(hButtonMute,     0, x + (BTN_W + GAP)*3, BTN_Y, BTN_W, BTN_H, SWP_NOZORDER);
-    SetWindowPos(hButtonDev,      0, x + (BTN_W + GAP)*4, BTN_Y, BTN_W, BTN_H, SWP_NOZORDER);
-    SetWindowPos(hButtonAttach,   0, x + (BTN_W + GAP)*5, BTN_Y, BTN_W, BTN_H, SWP_NOZORDER);
-    SetWindowPos(hButtonSettings, 0, x + (BTN_W + GAP)*6, BTN_Y, BTN_W, BTN_H, SWP_NOZORDER);
+    SetWindowPos(hButtonAttach,   0, x + (BTN_W + GAP)*4, BTN_Y, BTN_W, BTN_H, SWP_NOZORDER);
+    SetWindowPos(hButtonSettings, 0, x + (BTN_W + GAP)*5, BTN_Y, BTN_W, BTN_H, SWP_NOZORDER);
 
     SetWindowPos(hAttachLabel, 0, 15, LABEL_Y, W - 30, LABEL_H, SWP_NOZORDER);
     SetWindowPos(hEditInput, 0, 15, INPUT_Y, W - 30, INPUT_H, SWP_NOZORDER);
@@ -2219,22 +2225,6 @@ LRESULT CALLBACK WindowProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             if (g_muted) { std::lock_guard<std::mutex> lk(g_voiceMutex); if (g_pVoice) g_pVoice->Speak(L"", SPF_ASYNC | SPF_PURGEBEFORESPEAK, nullptr); }
             SetWindowTextW(hButtonMute, g_muted ? L"Unmute" : L"Mute"); break;
 
-        case IDC_BTN_DEV:
-            if (!consoleAllocated) {
-                AllocConsole();
-                SetConsoleTitleW(L"Nova Dev Console");
-                FILE* fOut = nullptr, * fErr = nullptr;
-                freopen_s(&fOut, "CONOUT$", "w", stdout);
-                freopen_s(&fErr, "CONOUT$", "w", stderr);
-                HWND hCon = GetConsoleWindow();
-                if (hCon) { HMENU hMenu = GetSystemMenu(hCon, FALSE); if (hMenu) DeleteMenu(hMenu, SC_CLOSE, MF_BYCOMMAND); }
-                consoleAllocated = true;
-                std::ifstream logIn(GetExeDir() + g_devLogFile);
-                if (logIn) { std::string logLine; while (std::getline(logIn, logLine)) printf("%s\n", logLine.c_str());
-                             printf("--- (end of buffered log) ---\n"); fflush(stdout); }
-                DevLog("Dev Console attached — live logging active\n");
-            }
-            break;
 
         case IDC_BTN_ATTACH: OpenAttachDialog(); break;
 
@@ -2429,14 +2419,13 @@ int WINAPI WinMain(HINSTANCE hI, HINSTANCE, LPSTR, int) {
     hButtonStop = CreateWindowExW(0, L"BUTTON", L"Stop", WS_CHILD | WS_VISIBLE | WS_DISABLED, 0,0,0,0, hMainWnd, (HMENU)IDC_BTN_STOP, hI, 0);
     hButtonClear    = CreateWindowExW(0, L"BUTTON", L"Clear",    WS_CHILD | WS_VISIBLE, 0,0,0,0, hMainWnd, (HMENU)IDC_BTN_CLEAR, hI, 0);
     hButtonMute     = CreateWindowExW(0, L"BUTTON", L"Mute",     WS_CHILD | WS_VISIBLE, 0,0,0,0, hMainWnd, (HMENU)IDC_BTN_MUTE, hI, 0);
-    hButtonDev      = CreateWindowExW(0, L"BUTTON", L"Dev",      WS_CHILD | WS_VISIBLE, 0,0,0,0, hMainWnd, (HMENU)IDC_BTN_DEV, hI, 0);
     hButtonAttach   = CreateWindowExW(0, L"BUTTON", L"Attach",   WS_CHILD | WS_VISIBLE, 0,0,0,0, hMainWnd, (HMENU)IDC_BTN_ATTACH, hI, 0);
     hButtonSettings = CreateWindowExW(0, L"BUTTON", L"\u2699",   WS_CHILD | WS_VISIBLE, 0,0,0,0, hMainWnd, (HMENU)IDC_BTN_SETTINGS, hI, 0);
     hAttachLabel    = CreateWindowExW(0, L"STATIC", L"",         WS_CHILD | WS_VISIBLE | SS_CENTER, 0,0,0,0, hMainWnd, 0, hI, 0);
 
     // Apply fonts
     for (HWND ctrl : { hEditDisplay, hEditInput }) SendMessageW(ctrl, WM_SETFONT, (WPARAM)hFontMain, TRUE);
-    for (HWND ctrl : { hButtonSend, hButtonStop, hButtonClear, hButtonMute, hButtonDev, hButtonAttach, hButtonSettings })
+    for (HWND ctrl : { hButtonSend, hButtonStop, hButtonClear, hButtonMute, hButtonAttach, hButtonSettings })
         SendMessageW(ctrl, WM_SETFONT, (WPARAM)hFontBtn, TRUE);
     SendMessageW(hAttachLabel, WM_SETFONT, (WPARAM)hFontIndicator, TRUE);
     SendMessageW(hEditInput, EM_EXLIMITTEXT, 0, (LPARAM)-1);
