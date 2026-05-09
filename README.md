@@ -2,7 +2,7 @@
 ### The Executive Desktop Assistant
 *"The performance & durability of the past with the intelligence of the future."*
 
-Nova is a native Win32 C++17 executive desktop assistant that connects to local or cloud AI providers and can automate real Windows tasks through PowerShell/CMD. No Electron. No bloat. No bullsh*t.
+Nova is the first native Win32 C++17 executive desktop AI assistant that connects to local or cloud AI providers and can automate real Windows tasks through PowerShell/CMD. No Electron. No bloat. No bullsh*t.
 
 ---
 
