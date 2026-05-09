@@ -1,6 +1,10 @@
-# Announcing Nova v1.5.1 & Nova Pro 🌎
-### The Executive Desktop Assistant
-*"The performance & durability of the past with the intelligence of the future."*
+<h1 align="center" style="margin-top:0;margin-bottom:0;">
+  <img src="https://94billy.com/wp-content/uploads/2026/03/Nova.png" alt="Nova Logo" width="100" /><br />
+  <span style="display:inline-block;margin-top:2px;">NOVA v1.5.1 🌎</span>
+</h1>
+
+<p align="center"><strong>The Executive Desktop Assistant</strong></p>
+<p align="center"><em>"The performance &amp; durability of the past with the intelligence of the future."</em></p>
 
 Nova is the first native Win32 C++17 executive desktop AI assistant that connects to local or cloud AI providers and can automate real Windows tasks through PowerShell/CMD. No Electron. No bloat. No bullsh*t.
 
