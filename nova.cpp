@@ -177,7 +177,7 @@ struct ProviderPreset {
 
 static const ProviderPreset g_providerPresets[PROV_COUNT] = {
     // 1. llama-server
-    { L"llama-server (local)",    "127.0.0.1", 11434, "/completion",           false, false, "",                        ProtocolType::LlamaLegacy  },
+    { L"llama-server (local)",    "127.0.0.1", 8080,  "/completion",           false, false, "",                        ProtocolType::LlamaLegacy  },
     // 2. Ollama
     { L"Ollama",                  "127.0.0.1", 11434, "/v1/chat/completions",  false, false, "llama3:latest",           ProtocolType::OpenAICompat },
     // 3. LM Studio
@@ -215,7 +215,7 @@ static const ProviderPreset g_providerPresets[PROV_COUNT] = {
 struct NovaConfig {
     ProviderType provider     = PROV_LLAMA_SERVER;
     std::string  host         = "127.0.0.1";
-    int          port         = 11434;
+    int          port         = 8080;
     std::string  apiKey;
     std::string  model;
     std::string  endpointPath = "/completion";
@@ -226,7 +226,7 @@ struct NovaConfig {
     int          gpuLayers    = 99;
     bool         autoStartEngine = true;
     std::string  modelPath    = "models\\llama3.gguf";
-    int          enginePort   = 11434;
+    int          enginePort   = 8080;
 };
 
 struct Attachment {
