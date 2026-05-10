@@ -382,7 +382,8 @@ std::mutex g_voiceMutex;
 
 const size_t      MAX_HISTORY_CHARS = 8000;
 const std::string g_historyFile     = "nova_history.txt";
-const std::string g_personalityFile = "nova_personality.txt";
+const std::string g_personalityFile  = "nova_personality.txt";
+const std::string g_traitDelimiter   = "# ---- EVOLVING TRAITS ----";
 const std::string g_devLogFile      = "nova_dev_log.txt";
 const std::string g_configFile      = "nova_config.ini";
 
@@ -413,8 +414,9 @@ void SaveHistory();
 void LoadHistory();
 void TrimHistory();
 std::string LoadPersonality();
-void SavePersonality(const std::string& n);
-void EvolvePersonality(const std::string& current, const std::string& exchange);
+std::string LoadTraitsOnly();
+void SavePersonality(const std::string& traits);
+void EvolvePersonality(const std::string& traits, const std::string& exchange);
 void ExecuteNovaCommand(const std::string& command, bool needsVS_Param = false);
 
 std::string FetchUrl(const std::string& url, const std::string& ua = "Mozilla/5.0");
@@ -1234,21 +1236,53 @@ std::string LoadPersonality() {
         std::stringstream ss; ss << f.rdbuf();
         basePrompt = ss.str();
     }
-    
+
     // Dynamically inject the true hardware path of the user's desktop
     basePrompt += "\n\n[SYSTEM ENVIRONMENT VARIABLES]\n";
     basePrompt += "USER DESKTOP PATH: " + GetDesktopDir() + "\n";
     basePrompt += "CRITICAL RULE: Always use the exact path above when saving or reading files from the desktop.\n";
-    
+
     return basePrompt;
 }
 
-void SavePersonality(const std::string& n) {
-    std::ofstream f(GetExeDir() + g_personalityFile);
-    if (f) f << n;
+// Returns only the evolving traits section (after the delimiter), or the whole file
+// if no delimiter exists (backwards compatibility). Never includes dynamic env vars.
+std::string LoadTraitsOnly() {
+    std::ifstream f(GetExeDir() + g_personalityFile);
+    if (!f) return "";
+    std::stringstream ss; ss << f.rdbuf();
+    std::string content = ss.str();
+    auto pos = content.find(g_traitDelimiter);
+    if (pos != std::string::npos) {
+        pos = content.find('\n', pos);
+        return (pos != std::string::npos) ? content.substr(pos + 1) : "";
+    }
+    return content;
 }
 
-void EvolvePersonality(const std::string& current, const std::string& exchange) {
+// Overwrites only the traits section; the protected header above the delimiter is never touched.
+void SavePersonality(const std::string& traits) {
+    std::string header;
+    {
+        std::ifstream rf(GetExeDir() + g_personalityFile);
+        if (rf) {
+            std::stringstream ss; ss << rf.rdbuf();
+            std::string content = ss.str();
+            auto pos = content.find(g_traitDelimiter);
+            if (pos != std::string::npos) {
+                pos = content.find('\n', pos);
+                if (pos != std::string::npos) header = content.substr(0, pos + 1);
+            }
+        }
+    }
+    std::ofstream wf(GetExeDir() + g_personalityFile);
+    if (wf) {
+        if (!header.empty()) wf << header;
+        wf << traits;
+    }
+}
+
+void EvolvePersonality(const std::string& traits, const std::string& exchange) {
     static int counter = 0;
     if (++counter % 3 != 0) return;
 
@@ -1256,8 +1290,13 @@ void EvolvePersonality(const std::string& current, const std::string& exchange) 
     if (safeExchange.size() > 4000) safeExchange = safeExchange.substr(0, 4000);
 
     DevLog("[Personality] Evolution started (call #%d)\n", counter);
-    std::string p = "Current Personality:\n" + current + "\n\nRecent exchange:\n" + safeExchange
-                  + "\n\nBriefly update the personality. Keep the tone warm, encouraging, inquisitive.";
+    std::string p = "You are updating Nova's personality traits.\n"
+                    "Current traits:\n" + traits + "\n\n"
+                    "Recent exchange:\n" + safeExchange + "\n\n"
+                    "Rewrite the traits section to reflect growth from the exchange. "
+                    "Keep the tone warm, encouraging, inquisitive, with a touch of playfulness. "
+                    "Output ONLY the updated trait descriptions as plain text. "
+                    "Do not include headers, system variables, prompts, or any meta-text.";
 
     // Use the configured provider for personality evolution too
     ProtocolType proto = g_providerPresets[g_config.provider].protocol;
@@ -1753,8 +1792,8 @@ void AIThreadFunc(std::wstring userMsg, std::string webInfo, bool hasAttach, Att
     // 6. Personality evolution
     if (ok) {
         std::string cleanReply = clean;
-        std::string currentP = LoadPersonality();
-    //  std::thread([currentP, cleanReply]() { EvolvePersonality(currentP, cleanReply); }).detach();
+        std::string currentTraits = LoadTraitsOnly();
+    //  std::thread([currentTraits, cleanReply]() { EvolvePersonality(currentTraits, cleanReply); }).detach();
     }
 }
 
