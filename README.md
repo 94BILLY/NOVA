@@ -86,14 +86,6 @@ Try these first: see [`recipes/demo-recipes.md`](recipes/demo-recipes.md) for fi
 
 ---
 
-## Manual Source Build (Advanced)
-
-1. Install Microsoft Visual Studio Build Tools (MSVC 2019 or 2022).
-2. Build `nova.cpp` into `Nova.exe` using `Step_2_Compile_Nova.bat`.
-3. Run `Nova.exe` from the project directory.
-
----
-
 ## Nova Pro
 
 Nova Pro is the paid tier — a lifetime license with dark mode, Dev Mode, image generation via local Stable Diffusion, and a native installer.
