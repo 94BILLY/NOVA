@@ -10,7 +10,7 @@ Nova is the first native Win32 C++17 executive desktop AI assistant that connect
 
 ---
 
-> **Nova Pro** — Dark mode, Dev Mode, and local image generation. Lifetime license, $19 founding member price.
+> **Nova Pro** — Dark mode, Dev Mode, and local image generation. Lifetime license, $19.99 Founding Member License.
 > **[Get Nova Pro on Gumroad →](https://94billy.gumroad.com/l/NOVA)**
 
 ---
