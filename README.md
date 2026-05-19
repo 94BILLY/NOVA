@@ -2,8 +2,6 @@
 <img src="https://raw.githubusercontent.com/94BILLY/NOVA/main/nova-icon.png" alt="Nova Logo" width="100" />
 
 ## NOVA v1.5.1
-
-![Nova Wallpaper](https://raw.githubusercontent.com/94BILLY/NOVA/main/Nova.Sue.Me.Wallpaper.png)
 </div>
 
 <p align="center"><strong>The Executive Desktop Assistant</strong></p>
@@ -122,3 +120,7 @@ Nova has no telemetry. API keys are saved in `nova_config.ini` — treat it as p
 © 2026 94BILLY · All rights reserved
 
 </div>
+
+---
+
+![Nova Wallpaper](https://raw.githubusercontent.com/94BILLY/NOVA/main/Nova.Sue.Me.Wallpaper.png)
