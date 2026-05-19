@@ -2,6 +2,8 @@
 <img src="nova-icon.png" alt="Nova Logo" width="100" />
 
 ## NOVA v1.5.1
+
+![Nova Wallpaper](Nova.Sue.Me.Wallpaper.png)
 </div>
 
 <p align="center"><strong>The Executive Desktop Assistant</strong></p>
