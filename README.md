@@ -1,7 +1,4 @@
-<h1 align="center" style="margin-top:0;margin-bottom:0;">
-  <img src="nova-icon.png" alt="Nova Logo" width="100" /><br />
-  <span style="display:inline-block;margin-top:2px;">NOVA v1.5.1</span>
-</h1>
+# ![Nova Logo](nova-icon.png) NOVA v1.5.1
 
 <p align="center"><strong>The Executive Desktop Assistant</strong></p>
 <p align="center"><em>"The performance &amp; durability of the past with the intelligence of the future."</em></p>
