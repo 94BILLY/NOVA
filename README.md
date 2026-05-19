@@ -1,7 +1,7 @@
 <div align="center">
 <img src="https://raw.githubusercontent.com/94BILLY/NOVA/main/nova-icon.png" alt="Nova Logo" width="100" />
 
-## NOVA v1.5.1
+## NOVA
 </div>
 
 <p align="center"><strong>The Executive Desktop Assistant</strong></p>
