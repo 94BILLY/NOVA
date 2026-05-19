@@ -1,4 +1,8 @@
-# ![Nova Logo](nova-icon.png) NOVA v1.5.1
+<div align="center">
+<img src="nova-icon.png" alt="Nova Logo" width="100" />
+
+## NOVA v1.5.1
+</div>
 
 <p align="center"><strong>The Executive Desktop Assistant</strong></p>
 <p align="center"><em>"The performance &amp; durability of the past with the intelligence of the future."</em></p>
