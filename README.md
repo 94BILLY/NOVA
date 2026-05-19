@@ -1,5 +1,5 @@
 <h1 align="center" style="margin-top:0;margin-bottom:0;">
-  <img src="https://94billy.com/wp-content/uploads/2026/03/Nova.png" alt="Nova Logo" width="100" /><br />
+  <img src="https://94billy.com/wp-content/uploads/2026/03/Nova.png" alt="Nova Logo" width="100" style="background:transparent;" /><br />
   <span style="display:inline-block;margin-top:2px;">NOVA v1.5.1 🌎</span>
 </h1>
 
